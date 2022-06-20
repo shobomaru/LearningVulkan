@@ -5,6 +5,8 @@ VisualStudioVersion = 16.0.32228.343
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "SimpleDraw", "SimpleDraw\SimpleDraw.vcxproj", "{04BC387F-65B0-428C-8B2C-8DAB6E25B147}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "SimpleSphere", "SimpleSphere\SimpleSphere.vcxproj", "{14A2B66C-8D48-4087-80EF-8E34B20CF264}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -19,6 +21,12 @@ Global
 		{04BC387F-65B0-428C-8B2C-8DAB6E25B147}.Release|x64.ActiveCfg = Release|x64
 		{04BC387F-65B0-428C-8B2C-8DAB6E25B147}.Release|x64.Build.0 = Release|x64
 		{04BC387F-65B0-428C-8B2C-8DAB6E25B147}.Release|x86.ActiveCfg = Release|x64
+		{14A2B66C-8D48-4087-80EF-8E34B20CF264}.Debug|x64.ActiveCfg = Debug|x64
+		{14A2B66C-8D48-4087-80EF-8E34B20CF264}.Debug|x64.Build.0 = Debug|x64
+		{14A2B66C-8D48-4087-80EF-8E34B20CF264}.Debug|x86.ActiveCfg = Debug|x64
+		{14A2B66C-8D48-4087-80EF-8E34B20CF264}.Release|x64.ActiveCfg = Release|x64
+		{14A2B66C-8D48-4087-80EF-8E34B20CF264}.Release|x64.Build.0 = Release|x64
+		{14A2B66C-8D48-4087-80EF-8E34B20CF264}.Release|x86.ActiveCfg = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

@@ -8,10 +8,8 @@
 #include <exception>
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <Vulkan/vulkan.hpp>
-#include <dxc/dxcapi.h>
 
 #pragma comment(lib, "vulkan-1.lib")
-#pragma comment(lib, "dxcompiler.lib")
 
 using namespace std;
 
