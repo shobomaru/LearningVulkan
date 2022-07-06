@@ -59,7 +59,6 @@ class VLK
 	vk::UniqueSemaphore mDrawingSema;
 
 	uint32_t mBackBufferIdx = 0;
-	bool mBackBuffersTouched[BUFFER_COUNT] = {};
 	uint64_t mFrameCount = 0;
 	vk::UniqueCommandPool mCmdPool;
 	std::vector<vk::UniqueCommandBuffer> mCmdBuf;
@@ -275,13 +274,12 @@ public:
 		auto cmdBuf = *mCmdBuf[mFrameCount % 2];
 		cmdBuf.begin(vk::CommandBufferBeginInfo(vk::CommandBufferUsageFlagBits::eOneTimeSubmit));
 
-		const auto layoutBefore =
-			mBackBuffersTouched[mBackBufferIdx] ? vk::ImageLayout::ePresentSrcKHR : vk::ImageLayout::eUndefined;
 		cmdBuf.pipelineBarrier(
 			vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eTransfer, {}, {}, {},
 			vk::ImageMemoryBarrier(
-				vk::AccessFlagBits::eMemoryRead, vk::AccessFlagBits::eTransferWrite,
-				layoutBefore, vk::ImageLayout::eTransferDstOptimal,
+				// Image layout can automatically be changed to UNDEFINED if previous content is not refer.
+				{ /*no access*/ }, vk::AccessFlagBits::eTransferWrite,
+				vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal,
 				mQueueFamilyGfxIdx, mQueueFamilyGfxIdx,
 				mBackBuffers[mBackBufferIdx],
 				vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1)));
@@ -293,9 +291,9 @@ public:
 			vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1));
 
 		cmdBuf.pipelineBarrier(
-			vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eBottomOfPipe, {}, {}, {},
+			vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eTransfer, {}, {}, {},
 			vk::ImageMemoryBarrier(
-				vk::AccessFlagBits::eTransferWrite, vk::AccessFlagBits::eMemoryRead,
+				vk::AccessFlagBits::eTransferWrite, vk::AccessFlagBits::eTransferRead,
 				vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::ePresentSrcKHR,
 				mQueueFamilyGfxIdx, mQueueFamilyGfxIdx,
 				mBackBuffers[mBackBufferIdx],
@@ -308,8 +306,6 @@ public:
 		const vk::PipelineStageFlags submitPipelineStage = vk::PipelineStageFlagBits::eBottomOfPipe;
 		const auto submitInfo = vk::SubmitInfo(*mSwapchainSema, submitPipelineStage, cmdBuf, *mDrawingSema);
 		mQueue.submit(submitInfo, fence);
-
-		mBackBuffersTouched[mBackBufferIdx] = true;
 	}
 
 	void Present()

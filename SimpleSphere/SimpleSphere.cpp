@@ -74,7 +74,6 @@ class VLK
 	vk::UniqueSemaphore mDrawingSema;
 
 	uint32_t mBackBufferIdx = 0;
-	bool mBackBuffersTouched[BUFFER_COUNT] = {};
 	uint64_t mFrameCount = 0;
 	vk::UniqueCommandPool mCmdPool;
 	std::vector<vk::UniqueCommandBuffer> mCmdBuf;
@@ -749,13 +748,11 @@ float4 main(Input input) : SV_Target {
 		cmdBuf.endRenderPass();
 
 		// Blit to back buffer
-		const auto beforeLayout = mBackBuffersTouched[mBackBufferIdx]
-			? vk::ImageLayout::ePresentSrcKHR : vk::ImageLayout::eUndefined;
 		cmdBuf.pipelineBarrier(
-			vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eTransfer, {}, {}, {},
+			vk::PipelineStageFlagBits::eColorAttachmentOutput, vk::PipelineStageFlagBits::eTransfer, {}, {}, {},
 			vk::ImageMemoryBarrier(
-				vk::AccessFlagBits::eMemoryRead, vk::AccessFlagBits::eTransferWrite,
-				beforeLayout, vk::ImageLayout::eTransferDstOptimal,
+				{ /*no access*/ }, vk::AccessFlagBits::eTransferWrite,
+				vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal,
 				mQueueFamilyGfxIdx, mQueueFamilyGfxIdx,
 				mBackBuffers[mBackBufferIdx],
 				vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1)));
@@ -767,10 +764,10 @@ float4 main(Input input) : SV_Target {
 		);
 
 		cmdBuf.pipelineBarrier(
-			vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eBottomOfPipe, {}, {}, {},
+			vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eTransfer, {}, {}, {},
 			vk::ImageMemoryBarrier(
 				vk::AccessFlagBits::eTransferWrite,
-				vk::AccessFlagBits::eMemoryRead,
+				vk::AccessFlagBits::eTransferRead,
 				vk::ImageLayout::eTransferDstOptimal,
 				vk::ImageLayout::ePresentSrcKHR,
 				mQueueFamilyGfxIdx, mQueueFamilyGfxIdx,
@@ -784,8 +781,6 @@ float4 main(Input input) : SV_Target {
 		const vk::PipelineStageFlags submitPipelineStage = vk::PipelineStageFlagBits::eBottomOfPipe;
 		const auto submitInfo = vk::SubmitInfo(*mSwapchainSema, submitPipelineStage, cmdBuf, *mDrawingSema);
 		mQueue.submit(submitInfo, fence);
-
-		mBackBuffersTouched[mBackBufferIdx] = true;
 	}
 
 	void Present()
