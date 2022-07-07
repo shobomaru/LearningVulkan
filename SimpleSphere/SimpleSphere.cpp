@@ -6,6 +6,7 @@
 #include <vector>
 #include <string_view>
 #include <exception>
+#include <functional>
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <Vulkan/vulkan.hpp>
 #include <wrl/client.h>
