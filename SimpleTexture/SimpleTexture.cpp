@@ -7,6 +7,7 @@
 #include <string_view>
 #include <exception>
 #include <functional>
+#include <fstream>
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <Vulkan/vulkan.hpp>
 #include <wrl/client.h>
@@ -66,8 +67,10 @@ class VLK
 	vk::UniqueSurfaceKHR mSurface;
 	vk::UniqueDevice mDevice;
 	uint32_t mQueueFamilyGfxIdx = 0;
+	uint32_t mQueueFamilyDmaIdx = 0;
 	vk::Queue mQueue = {};
 	vk::Queue mQueuePresent = {};
+	vk::Queue mQueueDma = {};
 	vk::UniqueSwapchainKHR mSwapchain;
 	std::vector<vk::Image> mBackBuffers;
 	std::vector<vk::UniqueImageView> mBackBuffersView;
@@ -82,7 +85,8 @@ class VLK
 	vk::UniqueDescriptorPool mDescPools[2];
 
 	vk::UniqueRenderPass mRenderPass;
-	vk::UniqueDescriptorSetLayout mDescriptorSetLayout;
+	vk::UniqueDescriptorSetLayout mDescriptorSetLayoutBuf;
+	vk::UniqueDescriptorSetLayout mDescriptorSetLayoutTex;
 	vk::UniquePipelineLayout mPipelineLayout;
 	vk::UniquePipeline mPSO;
 
@@ -99,6 +103,7 @@ class VLK
 	{
 		float position[3];
 		float normal[3];
+		float texcoord[2];
 	};
 	static constexpr int SphereSlices = 12;
 	static constexpr int SphereStacks = 12;
@@ -115,8 +120,24 @@ class VLK
 	vk::UniqueDeviceMemory mUniformMemory;
 	vk::DeviceSize mUniformMemoryOffsets[2];
 
-	vk::DescriptorSet mSphereDescSet[2];
-	vk::DescriptorSet mPlaneDescSet[2];
+	vk::UniqueCommandPool mDmaCmdPool;
+	vk::UniqueCommandBuffer mDmaCmdBuf;
+	vk::UniqueSemaphore mDmaSema;
+	vk::UniqueBuffer mImageUploadBuffer;
+	vk::UniqueDeviceMemory mImageUploadMemory;
+
+	vk::UniqueImage mSailboatImg;
+	vk::UniqueImageView mSailboatView;
+	vk::UniqueImage mLennaImg;
+	vk::UniqueImageView mLennaView;
+	vk::UniqueDeviceMemory mImagesMemory;
+
+	vk::UniqueSampler mSampler;
+
+	vk::DescriptorSet mSphereDescSetBuf[2];
+	vk::DescriptorSet mSphereDescSetTex[2];
+	vk::DescriptorSet mPlaneDescSetBuf[2];
+	vk::DescriptorSet mPlaneDescSetTex[2];
 
 public:
 	~VLK()
@@ -229,6 +250,23 @@ public:
 			return 0u;
 		}();
 		mQueueFamilyGfxIdx = queueGfxIdx;
+		const uint32_t queueDmaIdx = [&]() {
+			uint32_t f = ~0u;
+			for (uint32_t i = 0; i < queueFamilyProps.size(); ++i)
+			{
+				if (queueFamilyProps[i].queueFlags == vk::QueueFlagBits::eTransfer)
+				{
+					return i;
+				}
+				if (queueFamilyProps[i].queueFlags & vk::QueueFlagBits::eTransfer)
+				{
+					f = i;
+				}
+			}
+			ASSERT(f != ~0u, "No transfer queue found");
+			return f;
+		}();
+		mQueueFamilyDmaIdx = queueDmaIdx;
 
 		// Check device extension capabilities
 		for (auto& ext : deviceExtensions)
@@ -239,20 +277,34 @@ public:
 				) != end(supportedExts), "Extension not available");
 		}
 
+		// Check device features
+		const auto features = physDevice.getFeatures();
+		const auto props = physDevice.getProperties();
+		cout << "Device Name: " << props.deviceName << endl;
+		ASSERT(features.samplerAnisotropy, "Anisotropic sampling is not supported");
+		ASSERT(props.limits.maxBoundDescriptorSets >= 4, "maxBoundDescriptorSets is insufficient");
+		ASSERT(props.limits.maxSamplerAnisotropy >= 4, "maxSamplerAnisotropy is insufficient");
+
 		// Create a device
-		float queueGfxPriority = 1.0f;
-		const vk::DeviceQueueCreateInfo deviceQueueInfo[] = {
-			{{}, queueGfxIdx, 1, &queueGfxPriority},
+		float queueDefaultPriority = 1.0f;
+		vector<vk::DeviceQueueCreateInfo> deviceQueueInfos = {
+			{{}, queueGfxIdx, 1, &queueDefaultPriority}
 		};
+		if (queueGfxIdx != queueDmaIdx) {
+			deviceQueueInfos.push_back({ {}, queueDmaIdx, 1, &queueDefaultPriority });
+		}
+		const auto enableFeatures = vk::PhysicalDeviceFeatures()
+			.setSamplerAnisotropy(1);
 		const auto deviceCreateInfo = vk::DeviceCreateInfo(
-			{}, _countof(deviceQueueInfo), deviceQueueInfo,
-			0, nullptr, _countof(deviceExtensions), deviceExtensions
+			{}, (uint32_t)deviceQueueInfos.size(), deviceQueueInfos.data(),
+			0, nullptr, _countof(deviceExtensions), deviceExtensions, &enableFeatures
 		);
 		mDevice = physDevice.createDeviceUnique(deviceCreateInfo);
 
 		// Get device queues
 		mQueue = mDevice->getQueue(queueGfxIdx, 0);
 		mQueuePresent = mDevice->getQueue(queueGfxIdx, 0);
+		mQueueDma = mDevice->getQueue(queueDmaIdx, 0);
 
 		// Check surface format
 		const auto surfaceFormat = vk::Format::eB8G8R8A8Unorm;
@@ -310,6 +362,8 @@ public:
 		// Create descriptor pools
 		const auto descPoolSizes = {
 			vk::DescriptorPoolSize(vk::DescriptorType::eUniformBuffer, 100),
+			vk::DescriptorPoolSize(vk::DescriptorType::eSampledImage, 100),
+			vk::DescriptorPoolSize(vk::DescriptorType::eSampler, 10),
 		};
 		for (auto& p : mDescPools)
 		{
@@ -344,17 +398,36 @@ public:
 		);
 
 		// Create a descriptor set
-		const auto descriptorBinding = vk::DescriptorSetLayoutBinding(
-			0, vk::DescriptorType::eUniformBuffer, 1, vk::ShaderStageFlagBits::eVertex
-		);
-		const auto descriptorSetLayoutInfo = vk::DescriptorSetLayoutCreateInfo(
-			{}, descriptorBinding
-		);
-		mDescriptorSetLayout = mDevice->createDescriptorSetLayoutUnique(descriptorSetLayoutInfo);
+		// Set 0
+		{
+			const auto descriptorBinding = vk::DescriptorSetLayoutBinding(
+				0, vk::DescriptorType::eUniformBuffer, 1, vk::ShaderStageFlagBits::eVertex
+			);
+			const auto descriptorSetLayoutInfo = vk::DescriptorSetLayoutCreateInfo(
+				{}, descriptorBinding
+			);
+			mDescriptorSetLayoutBuf = mDevice->createDescriptorSetLayoutUnique(descriptorSetLayoutInfo);
+		}
+		// Set 1
+		{
+			const auto descriptorBinding = {
+				vk::DescriptorSetLayoutBinding(
+					0, vk::DescriptorType::eSampledImage, 1, vk::ShaderStageFlagBits::eFragment
+				),
+				vk::DescriptorSetLayoutBinding(
+					1, vk::DescriptorType::eSampler, 1, vk::ShaderStageFlagBits::eFragment
+				),
+			};
+			const auto descriptorSetLayoutInfo = vk::DescriptorSetLayoutCreateInfo(
+				{}, descriptorBinding
+			);
+			mDescriptorSetLayoutTex = mDevice->createDescriptorSetLayoutUnique(descriptorSetLayoutInfo);
+		}
 
 		// Create a pipeline layout
+		const auto pipelineDescSets = { *mDescriptorSetLayoutBuf, *mDescriptorSetLayoutTex };
 		mPipelineLayout = mDevice->createPipelineLayoutUnique(
-			vk::PipelineLayoutCreateInfo({}, *mDescriptorSetLayout)
+			vk::PipelineLayoutCreateInfo({}, pipelineDescSets)
 		);
 
 		// Create modules
@@ -366,24 +439,29 @@ struct Output {
 	float4 position : SV_Position;
 	float3 world : WorldPosition;
 	float3 normal : Normal;
+	float2 texcoord : Texcoord;
 };
-Output main(float3 position : Position, float3 normal : Normal) {
+Output main(float3 position : Position, float3 normal : Normal, float2 texcoord : Texcoord) {
 	Output output;
 	output.position = mul(float4(position, 1), ViewProj);
 	output.world = position;
 	output.normal = normalize(normal);
+	output.texcoord = texcoord;
 	return output;
 }
 )#";
 
 		static const char shaderCodeScenePS[] = R"#(
+[[vk::binding(0, 1)]] Texture2D Tex;
+[[vk::binding(1, 1)]] SamplerState SS;
 struct Input {
 	float4 position : SV_Position;
 	float3 world : WorldPosition;
 	float3 normal : Normal;
+	float2 texcoord : Texcoord;
 };
 float4 main(Input input) : SV_Target {
-	float4 color = float4(input.normal.xyz * 0.5 + 0.5, 1.0);
+	float4 color = Tex.Sample(SS, input.texcoord);
 	return color;
 }
 )#";
@@ -437,10 +515,11 @@ float4 main(Input input) : SV_Target {
 			vk::PipelineShaderStageCreateInfo({}, vk::ShaderStageFlagBits::eFragment, *fsModule, "main"),
 		};
 		const auto vertexInputBindingDesc
-			= vk::VertexInputBindingDescription(0, 24, vk::VertexInputRate::eVertex);
+			= vk::VertexInputBindingDescription(0, 32, vk::VertexInputRate::eVertex);
 		const auto vertexInputAttrsDesc = {
 			vk::VertexInputAttributeDescription(0, 0, vk::Format::eR32G32B32Sfloat, 0),
 			vk::VertexInputAttributeDescription(1, 0, vk::Format::eR32G32B32Sfloat, 12),
+			vk::VertexInputAttributeDescription(2, 0, vk::Format::eR32G32Sfloat, 24),
 		};
 		const auto pipelineVertexInputsInfo = vk::PipelineVertexInputStateCreateInfo(
 			{}, vertexInputBindingDesc, vertexInputAttrsDesc
@@ -563,6 +642,9 @@ float4 main(Input input) : SV_Target {
 				ve.normal[0] = ve.position[0] / r;
 				ve.normal[1] = ve.position[1] / r;
 				ve.normal[2] = ve.position[2] / r;
+				// Setup uv
+				ve.texcoord[0] = (float)x / SphereSlices;
+				ve.texcoord[1] = (float)y / SphereStacks;
 				vertices.push_back(ve);
 			}
 		}
@@ -604,10 +686,10 @@ float4 main(Input input) : SV_Target {
 		// Generate a plane
 		vertices.clear();
 		indices.clear();
-		vertices.push_back({ -1, -1, +1,  0, +1,  0 });
-		vertices.push_back({ +1, -1, +1,  0, +1,  0 });
-		vertices.push_back({ -1, -1, -1,  0, +1,  0 });
-		vertices.push_back({ +1, -1, -1,  0, +1,  0 });
+		vertices.push_back({ -1, -1, +1,  0, +1,  0, 0, 0 });
+		vertices.push_back({ +1, -1, +1,  0, +1,  0, 1, 0 });
+		vertices.push_back({ -1, -1, -1,  0, +1,  0, 0, 1 });
+		vertices.push_back({ +1, -1, -1,  0, +1,  0, 1, 1 });
 		for (auto& v : vertices) { v.position[0] *= 3; v.position[1] *= 3; v.position[2] *= 3; }
 		indices.push_back({ 0, 1, 2, 2, 1, 3 });
 
@@ -652,6 +734,143 @@ float4 main(Input input) : SV_Target {
 			mDevice->bindBufferMemory(*mUniformBuffers[i], *mUniformMemory, ofs);
 			mUniformMemoryOffsets[i] = ofs;
 		}
+
+		// Prepare a transfer command and a buffer
+		mDmaCmdPool = mDevice->createCommandPoolUnique(
+			vk::CommandPoolCreateInfo(
+				vk::CommandPoolCreateFlagBits::eTransient | vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
+				queueDmaIdx));
+		mDmaCmdBuf = move(mDevice->allocateCommandBuffersUnique(vk::CommandBufferAllocateInfo(
+			*mDmaCmdPool, vk::CommandBufferLevel::ePrimary, 1))[0]);
+		mDmaSema = mDevice->createSemaphoreUnique({});
+		mImageUploadBuffer = mDevice->createBufferUnique(vk::BufferCreateInfo(
+			{}, 8 * 1024 * 1024, vk::BufferUsageFlagBits::eTransferSrc
+		));
+		const auto imageUploadMemReq = mDevice->getBufferMemoryRequirements(*mImageUploadBuffer);
+		mImageUploadMemory = mDevice->allocateMemoryUnique(vk::MemoryAllocateInfo(
+			imageUploadMemReq.size, GetMemTypeIndex(imageUploadMemReq, true)
+		));
+		mDevice->bindBufferMemory(*mImageUploadBuffer, *mImageUploadMemory, 0);
+
+		// Create a sampler
+		mSampler = mDevice->createSamplerUnique(vk::SamplerCreateInfo(
+			{}, vk::Filter::eLinear, vk::Filter::eLinear, vk::SamplerMipmapMode::eLinear,
+			vk::SamplerAddressMode::eClampToEdge, vk::SamplerAddressMode::eClampToEdge, vk::SamplerAddressMode::eClampToEdge,
+			0.0f, VK_TRUE, 4.0f, VK_FALSE, {}, 0.0f, VK_LOD_CLAMP_NONE
+		));
+
+		// Load images
+		struct ImageData
+		{
+			vk::Extent3D extent;
+			uint32_t size;
+			unique_ptr<char[]> data;
+		};
+		auto loadBitmap = [&](const char* path) {
+			ifstream ifs(path, ios::binary);
+			BITMAPFILEHEADER fileHeader = {};
+			ifs.read(reinterpret_cast<char*>(&fileHeader), sizeof(fileHeader));
+			ASSERT(fileHeader.bfType == 0x4D42, "Invalid BMP format");
+			BITMAPINFOHEADER header;
+			ifs.read(reinterpret_cast<char*>(&header), sizeof(header));
+			auto oneline = make_unique<char[]>(header.biWidth * 3); // rgb
+			auto data = make_unique<char[]>(header.biWidth * header.biHeight * 4); // rgba
+			for (int y = 0; y < header.biHeight; y++)
+			{
+				ifs.read(oneline.get(), header.biWidth * 3);
+				for (int x = 0; x < header.biWidth; ++x)
+				{
+					int p = (header.biHeight - 1 - y) * header.biWidth + x;
+					data[p * 4] = oneline[x * 3 + 2];
+					data[p * 4 + 1] = oneline[x * 3 + 1];
+					data[p * 4 + 2] = oneline[x * 3];
+					data[p * 4 + 3] = '\xFF';
+				}
+			}
+			return ImageData{
+				vk::Extent3D(header.biWidth, header.biHeight, 1),
+				uint32_t(4 * header.biWidth * header.biHeight),
+				move(data) };
+		};
+		auto sailboatData = loadBitmap("../res/Sailboat.bmp");
+		auto lennaData = loadBitmap("../res/Lenna.bmp");
+
+		// Create images
+		mSailboatImg = mDevice->createImageUnique(vk::ImageCreateInfo(
+			{}, vk::ImageType::e2D, vk::Format::eR8G8B8A8Unorm, sailboatData.extent,
+			1, 1, vk::SampleCountFlagBits::e1, vk::ImageTiling::eOptimal,
+			vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
+			vk::SharingMode::eExclusive, {}, vk::ImageLayout::eUndefined
+		));
+		const auto sailboatMemReq = mDevice->getImageMemoryRequirements(*mSailboatImg);
+		mLennaImg = mDevice->createImageUnique(vk::ImageCreateInfo(
+			{}, vk::ImageType::e2D, vk::Format::eR8G8B8A8Unorm, lennaData.extent,
+			1, 1, vk::SampleCountFlagBits::e1, vk::ImageTiling::eOptimal,
+			vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
+			vk::SharingMode::eExclusive, {}, vk::ImageLayout::eUndefined
+		));
+		const auto lennaMemReq = mDevice->getImageMemoryRequirements(*mLennaImg);
+		mImagesMemory = mDevice->allocateMemoryUnique(vk::MemoryAllocateInfo(
+			ALIGN(sailboatMemReq.size, lennaMemReq.alignment) + lennaMemReq.size,
+			GetMemTypeIndex(sailboatMemReq, false)
+		));
+		mDevice->bindImageMemory(*mSailboatImg, *mImagesMemory, 0);
+		mDevice->bindImageMemory(*mLennaImg, *mImagesMemory, (uint64_t)ALIGN(sailboatMemReq.size, lennaMemReq.alignment));
+		mSailboatView = mDevice->createImageViewUnique(vk::ImageViewCreateInfo(
+			{}, *mSailboatImg, vk::ImageViewType::e2D, vk::Format::eR8G8B8A8Unorm, {},
+			vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1)
+		));
+		mLennaView = mDevice->createImageViewUnique(vk::ImageViewCreateInfo(
+			{}, *mLennaImg, vk::ImageViewType::e2D, vk::Format::eR8G8B8A8Unorm, {},
+			vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1)
+		));
+
+		// Upload image data
+		pData = reinterpret_cast<uint8_t*>(mDevice->mapMemory(*mImageUploadMemory, 0, VK_WHOLE_SIZE));
+		memcpy(pData, sailboatData.data.get(), sailboatData.size);
+		pData += sailboatData.size;
+		memcpy(pData, lennaData.data.get(), lennaData.size);
+		mDevice->unmapMemory(*mImageUploadMemory);
+
+		// Setup an image transfer command
+		mDmaCmdBuf->begin(vk::CommandBufferBeginInfo(vk::CommandBufferUsageFlagBits::eOneTimeSubmit));
+		const auto barriers = {
+			vk::ImageMemoryBarrier(
+				{}, vk::AccessFlagBits::eTransferWrite,
+				vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal,
+				mQueueFamilyDmaIdx, mQueueFamilyGfxIdx, *mSailboatImg,
+				vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1)
+			),
+			vk::ImageMemoryBarrier(
+				{}, vk::AccessFlagBits::eTransferWrite,
+				vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal,
+				mQueueFamilyDmaIdx, mQueueFamilyGfxIdx, *mLennaImg,
+				vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1)
+			),
+		};
+		mDmaCmdBuf->pipelineBarrier(
+			vk::PipelineStageFlagBits::eBottomOfPipe, vk::PipelineStageFlagBits::eTransfer, {},
+			{}, {}, barriers);
+		mDmaCmdBuf->copyBufferToImage(
+			*mImageUploadBuffer, *mSailboatImg, vk::ImageLayout::eTransferDstOptimal,
+			vk::BufferImageCopy(
+				0, 0, 0,
+				vk::ImageSubresourceLayers(vk::ImageAspectFlagBits::eColor, 0, 0, 1), {}, sailboatData.extent));
+		mDmaCmdBuf->copyBufferToImage(
+			*mImageUploadBuffer, *mLennaImg, vk::ImageLayout::eTransferDstOptimal,
+			vk::BufferImageCopy(
+				sailboatData.size, 0, 0,
+				vk::ImageSubresourceLayers(vk::ImageAspectFlagBits::eColor, 0, 0, 1), {}, lennaData.extent));
+		mDmaCmdBuf->end();
+
+		// Execute a transfer command
+		const auto submitInfo = vk::SubmitInfo({}, {}, *mDmaCmdBuf, *mDmaSema);
+		mQueueDma.submit(submitInfo, VK_NULL_HANDLE);
+
+		// Wait a grapihcs queue
+		const vk::PipelineStageFlags submitPipelineStage = vk::PipelineStageFlagBits::eBottomOfPipe;
+		const auto submitInfoGfx = vk::SubmitInfo(*mDmaSema, submitPipelineStage, {}, {});
+		mQueue.submit(submitInfoGfx, VK_NULL_HANDLE);
 	}
 
 	void Draw()
@@ -690,6 +909,28 @@ float4 main(Input input) : SV_Target {
 		cmdBuf.reset();
 		cmdBuf.begin(vk::CommandBufferBeginInfo(vk::CommandBufferUsageFlagBits::eOneTimeSubmit));
 
+		if (mFrameCount == 1)
+		{
+			// Change image layouts readable
+			const auto barriers = {
+				vk::ImageMemoryBarrier(
+					vk::AccessFlagBits::eTransferWrite, vk::AccessFlagBits::eShaderRead,
+					vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eShaderReadOnlyOptimal,
+					mQueueFamilyDmaIdx, mQueueFamilyGfxIdx, *mSailboatImg,
+					vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1)
+				),
+				vk::ImageMemoryBarrier(
+					vk::AccessFlagBits::eTransferWrite, vk::AccessFlagBits::eShaderRead,
+					vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eShaderReadOnlyOptimal,
+					mQueueFamilyDmaIdx, mQueueFamilyGfxIdx, *mLennaImg,
+					vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1)
+				),
+			};
+			cmdBuf.pipelineBarrier(
+				vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eFragmentShader, {},
+				{}, {}, barriers);
+		}
+
 		const std::array<vk::ClearValue, 2> sceneClearValue = {
 			vk::ClearColorValue(std::array<float, 4>({0.1f,0.2f,0.4f,1.0f})),
 			vk::ClearDepthStencilValue(1.0f)
@@ -702,47 +943,73 @@ float4 main(Input input) : SV_Target {
 		cmdBuf.beginRenderPass(renderPassInfo, vk::SubpassContents::eInline);
 
 		// Draw a sphere
-		if (!(mSphereDescSet[mFrameCount % 2]))
+		if (!(mSphereDescSetBuf[mFrameCount % 2]))
 		{
+			const auto descSetLayouts = { *mDescriptorSetLayoutBuf, *mDescriptorSetLayoutTex };
 			auto descSets = mDevice->allocateDescriptorSets(vk::DescriptorSetAllocateInfo(
-				*mDescPools[mFrameCount % 2], *mDescriptorSetLayout
+				*mDescPools[mFrameCount % 2], descSetLayouts
 			));
-			mSphereDescSet[mFrameCount % 2] = descSets[0];
+			mSphereDescSetBuf[mFrameCount % 2] = descSets[0];
+			mSphereDescSetTex[mFrameCount % 2] = descSets[1];
 		}
 		vk::WriteDescriptorSet wdescSets[10];
 		auto descBufInfo = vk::DescriptorBufferInfo(*mUniformBuffers[mFrameCount % 2], 0, VK_WHOLE_SIZE);
+		auto descTexInfo = vk::DescriptorImageInfo({}, *mSailboatView, vk::ImageLayout::eShaderReadOnlyOptimal);
+		auto descSamplerInfo = vk::DescriptorImageInfo(*mSampler, {}, {});
 		wdescSets[0] = vk::WriteDescriptorSet(
-			mSphereDescSet[mFrameCount % 2], 0, 0, 1, vk::DescriptorType::eUniformBuffer
+			mSphereDescSetBuf[mFrameCount % 2], 0, 0, 1, vk::DescriptorType::eUniformBuffer
 			).setBufferInfo(descBufInfo);
-		mDevice->updateDescriptorSets(1, wdescSets, 0, nullptr);
+		wdescSets[1] = vk::WriteDescriptorSet(
+			mSphereDescSetTex[mFrameCount % 2], 0, 0, 1, vk::DescriptorType::eSampledImage
+		).setImageInfo(descTexInfo);
+		wdescSets[2] = vk::WriteDescriptorSet(
+			mSphereDescSetTex[mFrameCount % 2], 1, 0, 1, vk::DescriptorType::eSampler
+		).setImageInfo(descSamplerInfo);
+		mDevice->updateDescriptorSets(3, wdescSets, 0, nullptr);
 		cmdBuf.setViewport(0, vk::Viewport(0, 0, (float)mSceneExtent.width, (float)mSceneExtent.height, 0, 1));
 		vk::Rect2D scissor({}, mSceneExtent);
 		cmdBuf.setScissor(0, scissor);
 		cmdBuf.bindPipeline(vk::PipelineBindPoint::eGraphics, *mPSO);
 		cmdBuf.bindVertexBuffers(0, *mSphereVB, { 0 });
 		cmdBuf.bindIndexBuffer(*mSphereIB, 0, vk::IndexType::eUint16);
+		const auto sphereDescSets = {
+			mSphereDescSetBuf[mFrameCount % 2], mSphereDescSetTex[mFrameCount % 2]
+		};
 		cmdBuf.bindDescriptorSets(
-			vk::PipelineBindPoint::eGraphics, *mPipelineLayout, 0, mSphereDescSet[mFrameCount % 2], {}
+			vk::PipelineBindPoint::eGraphics, *mPipelineLayout, 0, sphereDescSets, {}
 		);
 		cmdBuf.drawIndexed(6 * SphereStacks * SphereSlices, 1, 0, 0, 0);
 
 		// Draw a plane
-		if (!(mPlaneDescSet[mFrameCount % 2]))
+		if (!(mPlaneDescSetBuf[mFrameCount % 2]))
 		{
+			const auto descSetLayouts = { *mDescriptorSetLayoutBuf, *mDescriptorSetLayoutTex };
 			auto descSets = mDevice->allocateDescriptorSets(vk::DescriptorSetAllocateInfo(
-				*mDescPools[mFrameCount % 2], *mDescriptorSetLayout
+				*mDescPools[mFrameCount % 2], descSetLayouts
 			));
-			mPlaneDescSet[mFrameCount % 2] = descSets[0];
+			mPlaneDescSetBuf[mFrameCount % 2] = descSets[0];
+			mPlaneDescSetTex[mFrameCount % 2] = descSets[1];
 		}
 		descBufInfo = vk::DescriptorBufferInfo(*mUniformBuffers[mFrameCount % 2], 0, VK_WHOLE_SIZE);
+		descTexInfo = vk::DescriptorImageInfo({}, *mLennaView, vk::ImageLayout::eShaderReadOnlyOptimal);
+		descSamplerInfo = vk::DescriptorImageInfo(*mSampler, {}, {});
 		wdescSets[0] = vk::WriteDescriptorSet(
-			mPlaneDescSet[mFrameCount % 2], 0, 0, 1, vk::DescriptorType::eUniformBuffer
+			mPlaneDescSetBuf[mFrameCount % 2], 0, 0, 1, vk::DescriptorType::eUniformBuffer
 		).setBufferInfo(descBufInfo);
-		mDevice->updateDescriptorSets(1, wdescSets, 0, nullptr);
+		wdescSets[1] = vk::WriteDescriptorSet(
+			mPlaneDescSetTex[mFrameCount % 2], 0, 0, 1, vk::DescriptorType::eSampledImage
+		).setImageInfo(descTexInfo);
+		wdescSets[2] = vk::WriteDescriptorSet(
+			mPlaneDescSetTex[mFrameCount % 2], 1, 0, 1, vk::DescriptorType::eSampler
+		).setImageInfo(descSamplerInfo);
+		mDevice->updateDescriptorSets(3, wdescSets, 0, nullptr);
 		cmdBuf.bindVertexBuffers(0, *mPlaneVB, { 0 });
 		cmdBuf.bindIndexBuffer(*mPlaneIB, 0, vk::IndexType::eUint16);
+		const auto planeDescSets = {
+			mPlaneDescSetBuf[mFrameCount % 2], mPlaneDescSetTex[mFrameCount % 2]
+		};
 		cmdBuf.bindDescriptorSets(
-			vk::PipelineBindPoint::eGraphics, *mPipelineLayout, 0, mPlaneDescSet[mFrameCount % 2], {}
+			vk::PipelineBindPoint::eGraphics, *mPipelineLayout, 0, planeDescSets, {}
 		);
 		cmdBuf.drawIndexed(6, 1, 0, 0, 0);
 

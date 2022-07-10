@@ -7,6 +7,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "SimpleDraw", "SimpleDraw\Si
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "SimpleSphere", "SimpleSphere\SimpleSphere.vcxproj", "{14A2B66C-8D48-4087-80EF-8E34B20CF264}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "SimpleTexture", "SimpleTexture\SimpleTexture.vcxproj", "{BCAE0268-85BC-4BCE-B93B-454CDAE9D38E}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -27,6 +29,12 @@ Global
 		{14A2B66C-8D48-4087-80EF-8E34B20CF264}.Release|x64.ActiveCfg = Release|x64
 		{14A2B66C-8D48-4087-80EF-8E34B20CF264}.Release|x64.Build.0 = Release|x64
 		{14A2B66C-8D48-4087-80EF-8E34B20CF264}.Release|x86.ActiveCfg = Release|x64
+		{BCAE0268-85BC-4BCE-B93B-454CDAE9D38E}.Debug|x64.ActiveCfg = Debug|x64
+		{BCAE0268-85BC-4BCE-B93B-454CDAE9D38E}.Debug|x64.Build.0 = Debug|x64
+		{BCAE0268-85BC-4BCE-B93B-454CDAE9D38E}.Debug|x86.ActiveCfg = Debug|x64
+		{BCAE0268-85BC-4BCE-B93B-454CDAE9D38E}.Release|x64.ActiveCfg = Release|x64
+		{BCAE0268-85BC-4BCE-B93B-454CDAE9D38E}.Release|x64.Build.0 = Release|x64
+		{BCAE0268-85BC-4BCE-B93B-454CDAE9D38E}.Release|x86.ActiveCfg = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
