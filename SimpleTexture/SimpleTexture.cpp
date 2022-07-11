@@ -838,13 +838,13 @@ float4 main(Input input) : SV_Target {
 			vk::ImageMemoryBarrier(
 				{}, vk::AccessFlagBits::eTransferWrite,
 				vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal,
-				mQueueFamilyDmaIdx, mQueueFamilyGfxIdx, *mSailboatImg,
+				mQueueFamilyDmaIdx, mQueueFamilyDmaIdx, *mSailboatImg,
 				vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1)
 			),
 			vk::ImageMemoryBarrier(
 				{}, vk::AccessFlagBits::eTransferWrite,
 				vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal,
-				mQueueFamilyDmaIdx, mQueueFamilyGfxIdx, *mLennaImg,
+				mQueueFamilyDmaIdx, mQueueFamilyDmaIdx, *mLennaImg,
 				vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1)
 			),
 		};
@@ -861,6 +861,24 @@ float4 main(Input input) : SV_Target {
 			vk::BufferImageCopy(
 				sailboatData.size, 0, 0,
 				vk::ImageSubresourceLayers(vk::ImageAspectFlagBits::eColor, 0, 0, 1), {}, lennaData.extent));
+		// Release exclusive ownership if (mQueueFamilyDmaIdx != mQueueFamilyGfxIdx)
+		const auto barriers2 = {
+			vk::ImageMemoryBarrier(
+				vk::AccessFlagBits::eTransferWrite, {},
+				vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eShaderReadOnlyOptimal,
+				mQueueFamilyDmaIdx, mQueueFamilyGfxIdx, *mSailboatImg,
+				vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1)
+			),
+			vk::ImageMemoryBarrier(
+				vk::AccessFlagBits::eTransferWrite, {},
+				vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eShaderReadOnlyOptimal,
+				mQueueFamilyDmaIdx, mQueueFamilyGfxIdx, *mLennaImg,
+				vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1)
+			),
+		};
+		mDmaCmdBuf->pipelineBarrier(
+			vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eBottomOfPipe, {},
+			{}, {}, barriers2);
 		mDmaCmdBuf->end();
 
 		// Execute a transfer command
@@ -909,18 +927,18 @@ float4 main(Input input) : SV_Target {
 		cmdBuf.reset();
 		cmdBuf.begin(vk::CommandBufferBeginInfo(vk::CommandBufferUsageFlagBits::eOneTimeSubmit));
 
-		if (mFrameCount == 1)
+		// Acquire exclusive ownership
+		if (mFrameCount == 1 && mQueueFamilyDmaIdx != mQueueFamilyGfxIdx)
 		{
-			// Change image layouts readable
 			const auto barriers = {
 				vk::ImageMemoryBarrier(
-					vk::AccessFlagBits::eTransferWrite, vk::AccessFlagBits::eShaderRead,
+					{}/*ignored*/, vk::AccessFlagBits::eShaderRead,
 					vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eShaderReadOnlyOptimal,
 					mQueueFamilyDmaIdx, mQueueFamilyGfxIdx, *mSailboatImg,
 					vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1)
 				),
 				vk::ImageMemoryBarrier(
-					vk::AccessFlagBits::eTransferWrite, vk::AccessFlagBits::eShaderRead,
+					{}/*ignored*/, vk::AccessFlagBits::eShaderRead,
 					vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eShaderReadOnlyOptimal,
 					mQueueFamilyDmaIdx, mQueueFamilyGfxIdx, *mLennaImg,
 					vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1)
