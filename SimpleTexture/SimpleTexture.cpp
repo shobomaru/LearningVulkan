@@ -128,8 +128,10 @@ class VLK
 
 	vk::UniqueImage mSailboatImg;
 	vk::UniqueImageView mSailboatView;
+	uint32_t mSailboatMipLevels;
 	vk::UniqueImage mLennaImg;
 	vk::UniqueImageView mLennaView;
+	uint32_t mLennaMipLevels;
 	vk::UniqueDeviceMemory mImagesMemory;
 
 	vk::UniqueSampler mSampler;
@@ -251,14 +253,17 @@ public:
 		}();
 		mQueueFamilyGfxIdx = queueGfxIdx;
 		const uint32_t queueDmaIdx = [&]() {
+			const vk::QueueFlags mask =
+				vk::QueueFlagBits::eGraphics | vk::QueueFlagBits::eCompute | vk::QueueFlagBits::eTransfer;
 			uint32_t f = ~0u;
 			for (uint32_t i = 0; i < queueFamilyProps.size(); ++i)
 			{
-				if (queueFamilyProps[i].queueFlags == vk::QueueFlagBits::eTransfer)
+				auto queueFlags = queueFamilyProps[i].queueFlags & mask;
+				if (queueFlags == vk::QueueFlagBits::eTransfer)
 				{
 					return i;
 				}
-				if (queueFamilyProps[i].queueFlags & vk::QueueFlagBits::eTransfer)
+				if (queueFlags & vk::QueueFlagBits::eTransfer)
 				{
 					f = i;
 				}
@@ -759,28 +764,29 @@ float4 main(Input input) : SV_Target {
 			0.0f, VK_TRUE, 4.0f, VK_FALSE, {}, 0.0f, VK_LOD_CLAMP_NONE
 		));
 
-		// Load images
+		// Load images and generate mipmaps
 		struct ImageData
 		{
 			vk::Extent3D extent;
 			uint32_t size;
-			unique_ptr<char[]> data;
+			unique_ptr<uint8_t[]> data;
 		};
-		auto loadBitmap = [&](const char* path) {
+		auto loadBitmap = [&](const char* path)
+		{
 			ifstream ifs(path, ios::binary);
 			BITMAPFILEHEADER fileHeader = {};
 			ifs.read(reinterpret_cast<char*>(&fileHeader), sizeof(fileHeader));
 			ASSERT(fileHeader.bfType == 0x4D42, "Invalid BMP format");
 			BITMAPINFOHEADER header;
 			ifs.read(reinterpret_cast<char*>(&header), sizeof(header));
-			auto oneline = make_unique<char[]>(header.biWidth * 3); // rgb
-			auto data = make_unique<char[]>(header.biWidth * header.biHeight * 4); // rgba
+			auto oneline = make_unique<uint8_t[]>(header.biWidth * 3); // rgb
+			auto data = make_unique<uint8_t[]>(header.biWidth * header.biHeight * 4); // rgba
 			for (int y = 0; y < header.biHeight; y++)
 			{
-				ifs.read(oneline.get(), header.biWidth * 3);
+				ifs.read(reinterpret_cast<char*>(oneline.get()), header.biWidth * 3);
 				for (int x = 0; x < header.biWidth; ++x)
 				{
-					int p = (header.biHeight - 1 - y) * header.biWidth + x;
+					const int p = (header.biHeight - 1 - y) * header.biWidth + x;
 					data[p * 4] = oneline[x * 3 + 2];
 					data[p * 4 + 1] = oneline[x * 3 + 1];
 					data[p * 4 + 2] = oneline[x * 3];
@@ -792,20 +798,55 @@ float4 main(Input input) : SV_Target {
 				uint32_t(4 * header.biWidth * header.biHeight),
 				move(data) };
 		};
-		auto sailboatData = loadBitmap("../res/Sailboat.bmp");
-		auto lennaData = loadBitmap("../res/Lenna.bmp");
+		auto generateMipmap = [](ImageData&& mip0)
+		{
+			auto downsample = [](const ImageData& high)
+			{
+				const auto ext = vk::Extent3D(max(1u, high.extent.width / 2), max(1u, high.extent.height / 2), 1);
+				auto data = make_unique<uint8_t[]>(ext.width * ext.height * 4);
+				for (uint32_t y = 0; y < ext.height; ++y)
+				{
+					for (uint32_t x = 0; x < ext.width; ++x)
+					{
+						const auto pd = y * ext.width + x;
+						const auto ps = 2 * y * 2 * ext.width + 2 * x;
+						for (int c = 0; c < 4; ++c)
+						{
+
+							uint32_t d = high.data[ps * 4 + c];
+							d += high.data[ps * 4 + 1 * 4 + c];
+							d += high.data[ps * 4 + high.extent.width * 4 + c];
+							d += high.data[ps * 4 + high.extent.width * 4 + 1 * 4 + c];
+							data[pd * 4 + c] = static_cast<uint8_t>((d + 2) / 4);
+						}
+					}
+				}
+				return ImageData{ ext, uint32_t(ext.width * ext.height * 4), move(data) };
+			};
+			vector<ImageData> v;
+			v.push_back(ImageData{ mip0.extent, mip0.size, move(mip0.data) });
+			while (v.rbegin()->extent.width != 1 || v.rbegin()->extent.height != 1)
+			{
+				v.push_back(downsample(*v.rbegin()));
+			}
+			return v;
+		};
+		auto sailboatData = generateMipmap(loadBitmap("../res/Sailboat.bmp"));
+		auto lennaData = generateMipmap(loadBitmap("../res/Lenna.bmp"));
+		mSailboatMipLevels = (uint32_t)sailboatData.size();
+		mLennaMipLevels = (uint32_t)lennaData.size();
 
 		// Create images
 		mSailboatImg = mDevice->createImageUnique(vk::ImageCreateInfo(
-			{}, vk::ImageType::e2D, vk::Format::eR8G8B8A8Unorm, sailboatData.extent,
-			1, 1, vk::SampleCountFlagBits::e1, vk::ImageTiling::eOptimal,
+			{}, vk::ImageType::e2D, vk::Format::eR8G8B8A8Unorm, sailboatData[0].extent,
+			mSailboatMipLevels, 1, vk::SampleCountFlagBits::e1, vk::ImageTiling::eOptimal,
 			vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
 			vk::SharingMode::eExclusive, {}, vk::ImageLayout::eUndefined
 		));
 		const auto sailboatMemReq = mDevice->getImageMemoryRequirements(*mSailboatImg);
 		mLennaImg = mDevice->createImageUnique(vk::ImageCreateInfo(
-			{}, vk::ImageType::e2D, vk::Format::eR8G8B8A8Unorm, lennaData.extent,
-			1, 1, vk::SampleCountFlagBits::e1, vk::ImageTiling::eOptimal,
+			{}, vk::ImageType::e2D, vk::Format::eR8G8B8A8Unorm, lennaData[0].extent,
+			mLennaMipLevels, 1, vk::SampleCountFlagBits::e1, vk::ImageTiling::eOptimal,
 			vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
 			vk::SharingMode::eExclusive, {}, vk::ImageLayout::eUndefined
 		));
@@ -818,18 +859,25 @@ float4 main(Input input) : SV_Target {
 		mDevice->bindImageMemory(*mLennaImg, *mImagesMemory, (uint64_t)ALIGN(sailboatMemReq.size, lennaMemReq.alignment));
 		mSailboatView = mDevice->createImageViewUnique(vk::ImageViewCreateInfo(
 			{}, *mSailboatImg, vk::ImageViewType::e2D, vk::Format::eR8G8B8A8Unorm, {},
-			vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1)
+			vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, mSailboatMipLevels, 0, 1)
 		));
 		mLennaView = mDevice->createImageViewUnique(vk::ImageViewCreateInfo(
 			{}, *mLennaImg, vk::ImageViewType::e2D, vk::Format::eR8G8B8A8Unorm, {},
-			vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1)
+			vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, mLennaMipLevels, 0, 1)
 		));
 
 		// Upload image data
 		pData = reinterpret_cast<uint8_t*>(mDevice->mapMemory(*mImageUploadMemory, 0, VK_WHOLE_SIZE));
-		memcpy(pData, sailboatData.data.get(), sailboatData.size);
-		pData += sailboatData.size;
-		memcpy(pData, lennaData.data.get(), lennaData.size);
+		for (int i = 0; i < sailboatData.size(); ++i)
+		{
+			memcpy(pData, sailboatData[i].data.get(), sailboatData[i].size);
+			pData += sailboatData[i].size;
+		}
+		for (int i = 0; i < lennaData.size(); ++i)
+		{
+			memcpy(pData, lennaData[i].data.get(), lennaData[i].size);
+			pData += lennaData[i].size;
+		}
 		mDevice->unmapMemory(*mImageUploadMemory);
 
 		// Setup an image transfer command
@@ -839,41 +887,50 @@ float4 main(Input input) : SV_Target {
 				{}, vk::AccessFlagBits::eTransferWrite,
 				vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal,
 				mQueueFamilyDmaIdx, mQueueFamilyDmaIdx, *mSailboatImg,
-				vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1)
+				vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, mSailboatMipLevels, 0, 1)
 			),
 			vk::ImageMemoryBarrier(
 				{}, vk::AccessFlagBits::eTransferWrite,
 				vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal,
 				mQueueFamilyDmaIdx, mQueueFamilyDmaIdx, *mLennaImg,
-				vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1)
+				vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, mLennaMipLevels, 0, 1)
 			),
 		};
 		mDmaCmdBuf->pipelineBarrier(
 			vk::PipelineStageFlagBits::eBottomOfPipe, vk::PipelineStageFlagBits::eTransfer, {},
 			{}, {}, barriers);
-		mDmaCmdBuf->copyBufferToImage(
-			*mImageUploadBuffer, *mSailboatImg, vk::ImageLayout::eTransferDstOptimal,
-			vk::BufferImageCopy(
-				0, 0, 0,
-				vk::ImageSubresourceLayers(vk::ImageAspectFlagBits::eColor, 0, 0, 1), {}, sailboatData.extent));
-		mDmaCmdBuf->copyBufferToImage(
-			*mImageUploadBuffer, *mLennaImg, vk::ImageLayout::eTransferDstOptimal,
-			vk::BufferImageCopy(
-				sailboatData.size, 0, 0,
-				vk::ImageSubresourceLayers(vk::ImageAspectFlagBits::eColor, 0, 0, 1), {}, lennaData.extent));
+		size_t bufferOffset = 0;
+		for (int i = 0; i < sailboatData.size(); ++i)
+		{
+			mDmaCmdBuf->copyBufferToImage(
+				*mImageUploadBuffer, *mSailboatImg, vk::ImageLayout::eTransferDstOptimal,
+				vk::BufferImageCopy(
+					bufferOffset, 0, 0,
+					vk::ImageSubresourceLayers(vk::ImageAspectFlagBits::eColor, i, 0, 1), {}, sailboatData[i].extent));
+			bufferOffset += sailboatData[i].size;
+		}
+		for (int i = 0; i < lennaData.size(); ++i)
+		{
+			mDmaCmdBuf->copyBufferToImage(
+				*mImageUploadBuffer, *mLennaImg, vk::ImageLayout::eTransferDstOptimal,
+				vk::BufferImageCopy(
+					bufferOffset, 0, 0,
+					vk::ImageSubresourceLayers(vk::ImageAspectFlagBits::eColor, i, 0, 1), {}, lennaData[i].extent));
+			bufferOffset += lennaData[i].size;
+		}
 		// Release exclusive ownership if (mQueueFamilyDmaIdx != mQueueFamilyGfxIdx)
 		const auto barriers2 = {
 			vk::ImageMemoryBarrier(
 				vk::AccessFlagBits::eTransferWrite, {},
 				vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eShaderReadOnlyOptimal,
 				mQueueFamilyDmaIdx, mQueueFamilyGfxIdx, *mSailboatImg,
-				vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1)
+				vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, mSailboatMipLevels, 0, 1)
 			),
 			vk::ImageMemoryBarrier(
 				vk::AccessFlagBits::eTransferWrite, {},
 				vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eShaderReadOnlyOptimal,
 				mQueueFamilyDmaIdx, mQueueFamilyGfxIdx, *mLennaImg,
-				vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1)
+				vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, mLennaMipLevels, 0, 1)
 			),
 		};
 		mDmaCmdBuf->pipelineBarrier(
@@ -935,13 +992,13 @@ float4 main(Input input) : SV_Target {
 					{}/*ignored*/, vk::AccessFlagBits::eShaderRead,
 					vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eShaderReadOnlyOptimal,
 					mQueueFamilyDmaIdx, mQueueFamilyGfxIdx, *mSailboatImg,
-					vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1)
+					vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, mSailboatMipLevels, 0, 1)
 				),
 				vk::ImageMemoryBarrier(
 					{}/*ignored*/, vk::AccessFlagBits::eShaderRead,
 					vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eShaderReadOnlyOptimal,
 					mQueueFamilyDmaIdx, mQueueFamilyGfxIdx, *mLennaImg,
-					vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1)
+					vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, mLennaMipLevels, 0, 1)
 				),
 			};
 			cmdBuf.pipelineBarrier(
