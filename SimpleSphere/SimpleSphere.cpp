@@ -458,7 +458,7 @@ float4 main(Input input) : SV_Target {
 		const auto pipelineMSAAInfo = vk::PipelineMultisampleStateCreateInfo();
 		const auto pipelineDSSInfo = vk::PipelineDepthStencilStateCreateInfo()
 			.setDepthTestEnable(VK_TRUE).setDepthWriteEnable(VK_TRUE)
-			.setDepthCompareOp(vk::CompareOp::eLessOrEqual);
+			.setDepthCompareOp(vk::CompareOp::eGreaterOrEqual);
 		const auto blendAttachmentState = vk::PipelineColorBlendAttachmentState()
 			.setColorWriteMask(
 				vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG |
@@ -676,7 +676,7 @@ float4 main(Input input) : SV_Target {
 
 		auto worldMat = DirectX::XMMatrixIdentity();
 		auto viewMat = DirectX::XMMatrixLookAtLH(mCameraPos, mCameraTarget, mCameraUp);
-		auto projMat = DirectX::XMMatrixPerspectiveFovLH(fov, aspect, nearClip, farClip);
+		auto projMat = DirectX::XMMatrixPerspectiveFovLH(fov, aspect, farClip, nearClip); // Reversed depth
 
 		auto wvpMat = DirectX::XMMatrixTranspose(worldMat * viewMat * projMat);
 
@@ -692,7 +692,7 @@ float4 main(Input input) : SV_Target {
 
 		const std::array<vk::ClearValue, 2> sceneClearValue = {
 			vk::ClearColorValue(std::array<float, 4>({0.1f,0.2f,0.4f,1.0f})),
-			vk::ClearDepthStencilValue(1.0f)
+			vk::ClearDepthStencilValue(0.0f)
 		};
 		const auto renderPassInfo = vk::RenderPassBeginInfo(
 			*mRenderPass, *mSceneFramebuffer, vk::Rect2D({}, mSceneExtent), sceneClearValue
