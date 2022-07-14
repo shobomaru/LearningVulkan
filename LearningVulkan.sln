@@ -13,6 +13,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Vulkan11Subgroup", "Vulkan1
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Vulkan12DescriptorIndexing", "Vulkan12DescriptorIndexing\Vulkan12DescriptorIndexing.vcxproj", "{67E8CAC4-3193-4FCC-B8B1-83E68B9334D9}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "SimpleMSAA", "SimpleMSAA\SimpleMSAA.vcxproj", "{2483D047-21E6-491E-864F-8D795D5D92E0}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -53,6 +55,12 @@ Global
 		{67E8CAC4-3193-4FCC-B8B1-83E68B9334D9}.Release|x64.Build.0 = Release|x64
 		{67E8CAC4-3193-4FCC-B8B1-83E68B9334D9}.Release|x86.ActiveCfg = Release|Win32
 		{67E8CAC4-3193-4FCC-B8B1-83E68B9334D9}.Release|x86.Build.0 = Release|Win32
+		{2483D047-21E6-491E-864F-8D795D5D92E0}.Debug|x64.ActiveCfg = Debug|x64
+		{2483D047-21E6-491E-864F-8D795D5D92E0}.Debug|x64.Build.0 = Debug|x64
+		{2483D047-21E6-491E-864F-8D795D5D92E0}.Debug|x86.ActiveCfg = Debug|x64
+		{2483D047-21E6-491E-864F-8D795D5D92E0}.Release|x64.ActiveCfg = Release|x64
+		{2483D047-21E6-491E-864F-8D795D5D92E0}.Release|x64.Build.0 = Release|x64
+		{2483D047-21E6-491E-864F-8D795D5D92E0}.Release|x86.ActiveCfg = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

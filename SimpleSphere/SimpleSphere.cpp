@@ -1,3 +1,5 @@
+// based on SimpleDraw.cpp
+
 #define _WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <Windows.h>
