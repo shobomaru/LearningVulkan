@@ -19,6 +19,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Vulkan12ImagelessFramebuffe
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "SubpassMSAA", "SubpassMSAA\SubpassMSAA.vcxproj", "{953309C4-0859-444E-9AC2-030F76F15BC0}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Vulkan10SpecializationConstants", "Vulkan10SpecializationConstants\Vulkan10SpecializationConstants.vcxproj", "{B218B8B7-307C-47A0-A3F7-522943E1EE55}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -77,6 +79,12 @@ Global
 		{953309C4-0859-444E-9AC2-030F76F15BC0}.Release|x64.ActiveCfg = Release|x64
 		{953309C4-0859-444E-9AC2-030F76F15BC0}.Release|x64.Build.0 = Release|x64
 		{953309C4-0859-444E-9AC2-030F76F15BC0}.Release|x86.ActiveCfg = Release|x64
+		{B218B8B7-307C-47A0-A3F7-522943E1EE55}.Debug|x64.ActiveCfg = Debug|x64
+		{B218B8B7-307C-47A0-A3F7-522943E1EE55}.Debug|x64.Build.0 = Debug|x64
+		{B218B8B7-307C-47A0-A3F7-522943E1EE55}.Debug|x86.ActiveCfg = Debug|x64
+		{B218B8B7-307C-47A0-A3F7-522943E1EE55}.Release|x64.ActiveCfg = Release|x64
+		{B218B8B7-307C-47A0-A3F7-522943E1EE55}.Release|x64.Build.0 = Release|x64
+		{B218B8B7-307C-47A0-A3F7-522943E1EE55}.Release|x86.ActiveCfg = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
