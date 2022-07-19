@@ -836,12 +836,12 @@ static HWND setupWindow(int width, int height)
 	}
 
 	RECT rect = { 0, 0, width, height };
-	AdjustWindowRect(&rect, WS_OVERLAPPEDWINDOW, FALSE);
+	AdjustWindowRect(&rect, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE);
 	const int windowWidth = (rect.right - rect.left);
 	const int windowHeight = (rect.bottom - rect.top);
 
 	HWND hWnd = CreateWindow(L"WindowClass", L"Window",
-		WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, 0, windowWidth, windowHeight,
+		WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, 0, windowWidth, windowHeight,
 		nullptr, nullptr, nullptr, nullptr);
 	if (!hWnd) {
 		throw runtime_error("CreateWindow()");
