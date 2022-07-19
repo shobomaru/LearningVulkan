@@ -1,5 +1,11 @@
 // based on SimpleTexture.cpp
 
+// Inspired fron Rainbow Six Siege
+// Standard MSAA x2 sample patterin is (0.75, 0.75), (0.25, 0.25)
+// so I add 1px border on checkerboard scene, and offset (0.0, 0.0), (0.5, 0.0) each frame
+// First time I have implemented using VK_EXT_sample_locations, but did not work properly on Radeon and Intel
+// and I found it's too cumbersome to modify varying PS parameters such as texcoord :(
+
 #define _WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <Windows.h>
@@ -186,15 +192,12 @@ public:
 			VK_KHR_SWAPCHAIN_EXTENSION_NAME,
 			VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME,
 			VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME,
-			// VK_EXT_sample_locations
-			// depends VK_KHR_get_physical_device_properties_2, which is promoted to Vulakn 1.1
-			VK_EXT_SAMPLE_LOCATIONS_EXTENSION_NAME,
 		};
 
 		// Create a Vulkan instance
 		const auto appInfo = vk::ApplicationInfo(
 			"MyApp", VK_MAKE_API_VERSION(0, 0, 0, 0),
-			"LearningVulkan", VK_MAKE_API_VERSION(0, 0, 0, 0), VK_API_VERSION_1_1);
+			"LearningVulkan", VK_MAKE_API_VERSION(0, 0, 0, 0), VK_API_VERSION_1_0);
 		const auto createInfo = vk::InstanceCreateInfo(
 			vk::InstanceCreateFlags(), &appInfo,
 			layerCount, layers,
@@ -300,19 +303,12 @@ public:
 		}
 
 		// Check device features
-		vk::PhysicalDeviceSampleLocationsPropertiesEXT propsSampleLocs;
-		vk::MultisamplePropertiesEXT propsMS;
-		vk::PhysicalDeviceFeatures2 props2;
-		props2.pNext = &propsSampleLocs;
-		propsSampleLocs.pNext = &propsMS;
-		vkGetPhysicalDeviceFeatures2(physDevice, reinterpret_cast<VkPhysicalDeviceFeatures2*>(&props2));
-		// TODO: check props
-		const auto features = physDevice.getFeatures2();
-		const auto props = physDevice.getProperties2();
-		cout << "Device Name: " << props.properties.deviceName << endl;
-		ASSERT(features.features.samplerAnisotropy, "Anisotropic sampling is not supported");
-		ASSERT(props.properties.limits.maxBoundDescriptorSets >= 4, "maxBoundDescriptorSets is insufficient");
-		ASSERT(props.properties.limits.maxSamplerAnisotropy >= 4, "maxSamplerAnisotropy is insufficient");
+		const auto features = physDevice.getFeatures();
+		const auto props = physDevice.getProperties();
+		cout << "Device Name: " << props.deviceName << endl;
+		ASSERT(features.samplerAnisotropy, "Anisotropic sampling is not supported");
+		ASSERT(props.limits.maxBoundDescriptorSets >= 4, "maxBoundDescriptorSets is insufficient");
+		ASSERT(props.limits.maxSamplerAnisotropy >= 4, "maxSamplerAnisotropy is insufficient");
 
 		// Create a device
 		float queueDefaultPriority = 1.0f;
@@ -323,7 +319,8 @@ public:
 			deviceQueueInfos.push_back({ {}, queueDmaIdx, 1, &queueDefaultPriority });
 		}
 		const auto enableFeatures = vk::PhysicalDeviceFeatures()
-			.setSamplerAnisotropy(1);
+			.setSamplerAnisotropy(1)
+			.setSampleRateShading(1);
 		const auto deviceCreateInfo = vk::DeviceCreateInfo(
 			{}, (uint32_t)deviceQueueInfos.size(), deviceQueueInfos.data(),
 			0, nullptr, _countof(deviceExtensions), deviceExtensions, &enableFeatures
@@ -522,8 +519,8 @@ struct Input {
 	float2 texcoord : Texcoord;
 };
 float4 main(Input input) : SV_Target {
-	float4 color = Tex.SampleBias(SS, input.texcoord, -1.0); // Checkerboard rendering needs to modify ddx/ddy
-color.a=input.position.x;
+	// We needs to modify ddx/ddy in order to match derivatives in full resolution
+	float4 color = Tex.SampleBias(SS, input.texcoord, -1.0);
 	return color;
 }
 )#";
@@ -538,12 +535,23 @@ struct PushConst { uint OddFrameFlag; };
 [numthreads(8, 8, 1)]
 void main(uint2 dtid : SV_DispatchThreadID) {
 	uint2 intpos = dtid;
+	uint2 halfpos = dtid / 2;
 	float4 color;
-	if ((intpos.x ^ intpos.y ^ pushConst.OddFrameFlag) & 1) {
-		color = Previous.Load(int3(intpos, 0));
+	if (pushConst.OddFrameFlag) {
+		if ((intpos.x ^ intpos.y) & 1) {
+			color = Previous.Load(int3(intpos, 0));
+		}
+		else {
+			color = (intpos.y & 1) ? Input.Load(halfpos, 0) : Input.Load(halfpos, 1);
+		}
 	}
 	else {
-		color = Input.Load(intpos / 2, (intpos.y & 1));
+		if ((intpos.x ^ intpos.y) & 1) {
+			color = (intpos.y & 1) ? Input.Load(halfpos, 0) : Input.Load(halfpos + uint2(1, 0), 1);
+		}
+		else {
+			color = Previous.Load(int3(intpos, 0));
+		}
 	}
 	Output[intpos] = color;
 }
@@ -632,7 +640,8 @@ void main(uint2 dtid : SV_DispatchThreadID) {
 			.setFrontFace(vk::FrontFace::eClockwise)
 			.setLineWidth(1.0f);
 		const auto pipelineMSAAInfo = vk::PipelineMultisampleStateCreateInfo()
-			.setRasterizationSamples(vk::SampleCountFlagBits::e2);
+			.setRasterizationSamples(vk::SampleCountFlagBits::e2)
+			.setSampleShadingEnable(VK_TRUE);
 		const auto pipelineDSSInfo = vk::PipelineDepthStencilStateCreateInfo()
 			.setDepthTestEnable(VK_TRUE).setDepthWriteEnable(VK_TRUE)
 			.setDepthCompareOp(vk::CompareOp::eGreaterOrEqual);
@@ -643,7 +652,7 @@ void main(uint2 dtid : SV_DispatchThreadID) {
 		const auto pipelineBSInfo = vk::PipelineColorBlendStateCreateInfo()
 			.setAttachments(blendAttachmentState);
 		const auto dynamicStates = {
-			vk::DynamicState::eViewport, vk::DynamicState::eScissor, vk::DynamicState::eSampleLocationsEXT // sample locations
+			vk::DynamicState::eViewport, vk::DynamicState::eScissor
 		};
 		const auto pipelineDynamicStatesInfo = vk::PipelineDynamicStateCreateInfo({}, dynamicStates);
 		const auto pipelineInfo = vk::GraphicsPipelineCreateInfo(
@@ -686,7 +695,7 @@ void main(uint2 dtid : SV_DispatchThreadID) {
 
 		// Create a color buffer
 		mSceneColor = mDevice->createImageUnique(vk::ImageCreateInfo(
-			{}, vk::ImageType::e2D, surfaceFormat, vk::Extent3D(width / 2, height / 2, 1),
+			{}, vk::ImageType::e2D, surfaceFormat, vk::Extent3D(width / 2 + 1, height / 2, 1),
 			1, 1, vk::SampleCountFlagBits::e2, vk::ImageTiling::eOptimal,
 			vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eSampled
 		).setInitialLayout(vk::ImageLayout::eUndefined)
@@ -703,7 +712,7 @@ void main(uint2 dtid : SV_DispatchThreadID) {
 
 		// Create a depth buffer
 		mSceneDepth = mDevice->createImageUnique(vk::ImageCreateInfo(
-			{}, vk::ImageType::e2D, vk::Format::eD32Sfloat, vk::Extent3D(width / 2, height / 2, 1),
+			{}, vk::ImageType::e2D, vk::Format::eD32Sfloat, vk::Extent3D(width / 2 + 1, height / 2, 1),
 			1, 1, vk::SampleCountFlagBits::e2, vk::ImageTiling::eOptimal,
 			vk::ImageUsageFlagBits::eDepthStencilAttachment
 		).setInitialLayout(vk::ImageLayout::eUndefined)
@@ -748,8 +757,8 @@ void main(uint2 dtid : SV_DispatchThreadID) {
 		// Create a frame buffer
 		const auto framebufferAttachments = { *mSceneColorView, *mSceneDepthView };
 		mSceneFramebuffer = mDevice->createFramebufferUnique(vk::FramebufferCreateInfo(
-			{}, *mRenderPass, framebufferAttachments, width / 2, height / 2, 1));
-		mSceneExtent = vk::Extent2D(width / 2, height / 2);
+			{}, *mRenderPass, framebufferAttachments, width / 2 + 1, height / 2, 1));
+		mSceneExtent = vk::Extent2D(width / 2 + 1, height / 2);
 
 		mResolveExtent = vk::Extent2D(width, height);
 
@@ -1093,13 +1102,21 @@ void main(uint2 dtid : SV_DispatchThreadID) {
 		// Make uniform buffer
 
 		auto fov = DirectX::XMConvertToRadians(45.0f);
-		auto aspect = 1.0f * mSceneExtent.width / mSceneExtent.height;
+		auto aspect = 1.0f * mResolveExtent.width / mResolveExtent.height;
 		auto nearClip = 0.01f;
 		auto farClip = 100.0f;
 
 		auto worldMat = DirectX::XMMatrixIdentity();
 		auto viewMat = DirectX::XMMatrixLookAtLH(mCameraPos, mCameraTarget, mCameraUp);
 		auto projMat = DirectX::XMMatrixPerspectiveFovLH(fov, aspect, farClip, nearClip); // Reversed depth
+
+		// Offset clip space position to make checkerboard pattern
+		if (mFrameCount & 1)
+		{
+			auto halfPx = 0.5f / mSceneExtent.width;
+			auto ofs = DirectX::XMVectorSet(-2.0f * halfPx, 0, 0, 0);
+			projMat.r[2] = DirectX::XMVectorAdd(projMat.r[2], ofs);
+		}
 
 		auto wvpMat = DirectX::XMMatrixTranspose(worldMat * viewMat * projMat);
 
@@ -1139,37 +1156,9 @@ void main(uint2 dtid : SV_DispatchThreadID) {
 			vk::ClearColorValue(std::array<float, 4>({0.1f,0.2f,0.4f,1.0f})),
 			vk::ClearDepthStencilValue(0.0f)
 		};
-		// Set checkerboard sample patterns in RenderPass
-		auto checkerPatternSampleLocs =
-			(mFrameCount & 1)
-			? array<vk::SampleLocationEXT, 2>{ // Odd
-					vk::SampleLocationEXT(0.75f, 0.25f),
-					vk::SampleLocationEXT(0.25f, 0.75f),
-				}
-			: array<vk::SampleLocationEXT, 2>{ // Even - match standard MSAA x2 sample location
-				vk::SampleLocationEXT(0.25f, 0.25f),
-				vk::SampleLocationEXT(0.75f, 0.75f),
-				};
-			//checkerPatternSampleLocs= {
-			//	vk::SampleLocationEXT(2.0f, 0.0f),
-			//	vk::SampleLocationEXT(2.0f, 0.0f),
-			//};
-		const auto sampleLocsInfo = vk::SampleLocationsInfoEXT(
-			vk::SampleCountFlagBits::e2, vk::Extent2D(1, 1), checkerPatternSampleLocs
-		);
-		const auto attachmentSampleLocs = vk::AttachmentSampleLocationsEXT(0, sampleLocsInfo);
-		const auto subpassSampleLocs = vk::SubpassSampleLocationsEXT(0, sampleLocsInfo);
-		const auto renderPassSampleLocsInfo = vk::RenderPassSampleLocationsBeginInfoEXT(
-			attachmentSampleLocs, subpassSampleLocs
-		);
 		const auto renderPassInfo = vk::RenderPassBeginInfo(
 			*mRenderPass, *mSceneFramebuffer, vk::Rect2D({}, mSceneExtent), sceneClearValue
-		).setPNext(&renderPassSampleLocsInfo);
-
-		// Set sample locations
-		//cmdBuf.setSampleLocationsEXT(sampleLocsInfo); // failed to link
-		auto cmdSetSampleLocationsEXT = (PFN_vkCmdSetSampleLocationsEXT)vkGetDeviceProcAddr(mDevice.get(), "vkCmdSetSampleLocationsEXT");
-		cmdSetSampleLocationsEXT(cmdBuf, reinterpret_cast<const VkSampleLocationsInfoEXT*>(&sampleLocsInfo));
+		);
 
 		cmdBuf.beginRenderPass(renderPassInfo, vk::SubpassContents::eInline);
 
@@ -1383,6 +1372,45 @@ void main(uint2 dtid : SV_DispatchThreadID) {
 		const auto r = mQueuePresent.presentKHR(presentInfo);
 	}
 
+	void MoveUp()
+	{
+		auto d = DirectX::XMMatrixRotationX(DirectX::XMConvertToRadians(-3.f));
+		auto p = DirectX::XMVector3TransformCoord(DirectX::XMVectorSubtract(mCameraTarget, mCameraPos), d);
+		mCameraTarget = DirectX::XMVectorAdd(p, mCameraPos);
+		mCameraUp = DirectX::XMVector3TransformCoord(mCameraUp, d);
+	}
+	void MoveDown()
+	{
+		auto d = DirectX::XMMatrixRotationX(DirectX::XMConvertToRadians(3.f));
+		auto p = DirectX::XMVector3TransformCoord(DirectX::XMVectorSubtract(mCameraTarget, mCameraPos), d);
+		mCameraTarget = DirectX::XMVectorAdd(p, mCameraPos);
+		mCameraUp = DirectX::XMVector3TransformCoord(mCameraUp, d);
+	}
+	void MoveFwd()
+	{
+		auto d = DirectX::XMVectorScale(DirectX::XMVectorSubtract(mCameraPos, mCameraTarget), -0.08f);
+		mCameraPos = DirectX::XMVectorAdd(d, mCameraPos);
+		mCameraTarget = DirectX::XMVectorAdd(d, mCameraTarget);
+	}
+	void MoveBack()
+	{
+		auto d = DirectX::XMVectorScale(DirectX::XMVectorSubtract(mCameraPos, mCameraTarget), 0.08f);
+		mCameraPos = DirectX::XMVectorAdd(d, mCameraPos);
+		mCameraTarget = DirectX::XMVectorAdd(d, mCameraTarget);
+	}
+	void MoveRight()
+	{
+		auto d = DirectX::XMMatrixRotationY(DirectX::XMConvertToRadians(-3.f));
+		auto p = DirectX::XMVector3TransformCoord(DirectX::XMVectorSubtract(mCameraTarget, mCameraPos), d);
+		mCameraTarget = DirectX::XMVectorAdd(p, mCameraPos);
+	}
+	void MoveLeft()
+	{
+		auto d = DirectX::XMMatrixRotationY(DirectX::XMConvertToRadians(3.f));
+		auto p = DirectX::XMVector3TransformCoord(DirectX::XMVectorSubtract(mCameraTarget, mCameraPos), d);
+		mCameraTarget = DirectX::XMVectorAdd(p, mCameraPos);
+	}
+
 private:
 	DirectX::XMVECTOR mCameraPos = DirectX::XMVectorSet(0.0f, 4.0f, -4.0f, 0);
 	DirectX::XMVECTOR mCameraTarget = DirectX::XMVectorSet(0, 0, 0, 0);
@@ -1465,6 +1493,15 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
 			}
 			else {
 				DispatchMessage(&msg);
+				if (msg.message == WM_KEYDOWN)
+				{
+					if (msg.wParam == 'E') vlk.MoveUp();
+					else if (msg.wParam == 'Q') vlk.MoveDown();
+					else if (msg.wParam == 'W') vlk.MoveFwd();
+					else if (msg.wParam == 'S') vlk.MoveBack();
+					else if (msg.wParam == 'D') vlk.MoveRight();
+					else if (msg.wParam == 'A') vlk.MoveLeft();
+				}
 			}
 		}
 	}
