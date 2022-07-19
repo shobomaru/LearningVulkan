@@ -915,7 +915,7 @@ float4 main(Input input) : SV_Target {
 			mSphereDescSetTex[mFrameCount % 2] = descSets[1];
 		}
 		vk::WriteDescriptorSet wdescSets[10];
-		auto descBufInfo = vk::DescriptorBufferInfo(*mUniformBuffers[mFrameCount % 2], 0, VK_WHOLE_SIZE);
+		auto descBufInfo = vk::DescriptorBufferInfo(*mUniformBuffers[mFrameCount % 2], 0, 2048);
 		wdescSets[0] = vk::WriteDescriptorSet(
 			mSphereDescSetBuf[mFrameCount % 2], 0, 0, 1, vk::DescriptorType::eUniformBuffer
 			).setBufferInfo(descBufInfo);

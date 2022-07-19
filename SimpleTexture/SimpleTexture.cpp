@@ -1030,7 +1030,7 @@ float4 main(Input input) : SV_Target {
 			mSphereDescSetTex[mFrameCount % 2] = descSets[1];
 		}
 		vk::WriteDescriptorSet wdescSets[10];
-		auto descBufInfo = vk::DescriptorBufferInfo(*mUniformBuffers[mFrameCount % 2], 0, VK_WHOLE_SIZE);
+		auto descBufInfo = vk::DescriptorBufferInfo(*mUniformBuffers[mFrameCount % 2], 0, 2048);
 		auto descTexInfo = vk::DescriptorImageInfo({}, *mSailboatView, vk::ImageLayout::eShaderReadOnlyOptimal);
 		auto descSamplerInfo = vk::DescriptorImageInfo(*mSampler, {}, {});
 		wdescSets[0] = vk::WriteDescriptorSet(
@@ -1067,7 +1067,7 @@ float4 main(Input input) : SV_Target {
 			mPlaneDescSetBuf[mFrameCount % 2] = descSets[0];
 			mPlaneDescSetTex[mFrameCount % 2] = descSets[1];
 		}
-		descBufInfo = vk::DescriptorBufferInfo(*mUniformBuffers[mFrameCount % 2], 0, VK_WHOLE_SIZE);
+		descBufInfo = vk::DescriptorBufferInfo(*mUniformBuffers[mFrameCount % 2], 0, 2048);
 		descTexInfo = vk::DescriptorImageInfo({}, *mLennaView, vk::ImageLayout::eShaderReadOnlyOptimal);
 		descSamplerInfo = vk::DescriptorImageInfo(*mSampler, {}, {});
 		wdescSets[0] = vk::WriteDescriptorSet(

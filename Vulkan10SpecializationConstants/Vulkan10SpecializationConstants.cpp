@@ -731,7 +731,7 @@ float4 main() : SV_Target {
 			mSphereDescSet[mFrameCount % 2] = descSets[0];
 		}
 		vk::WriteDescriptorSet wdescSets[10];
-		auto descBufInfo = vk::DescriptorBufferInfo(*mUniformBuffers[mFrameCount % 2], 0, VK_WHOLE_SIZE);
+		auto descBufInfo = vk::DescriptorBufferInfo(*mUniformBuffers[mFrameCount % 2], 0, 2048);
 		wdescSets[0] = vk::WriteDescriptorSet(
 			mSphereDescSet[mFrameCount % 2], 0, 0, 1, vk::DescriptorType::eUniformBuffer
 			).setBufferInfo(descBufInfo);
@@ -755,7 +755,7 @@ float4 main() : SV_Target {
 			));
 			mPlaneDescSet[mFrameCount % 2] = descSets[0];
 		}
-		descBufInfo = vk::DescriptorBufferInfo(*mUniformBuffers[mFrameCount % 2], 0, VK_WHOLE_SIZE);
+		descBufInfo = vk::DescriptorBufferInfo(*mUniformBuffers[mFrameCount % 2], 0, 2048);
 		wdescSets[0] = vk::WriteDescriptorSet(
 			mPlaneDescSet[mFrameCount % 2], 0, 0, 1, vk::DescriptorType::eUniformBuffer
 		).setBufferInfo(descBufInfo);
