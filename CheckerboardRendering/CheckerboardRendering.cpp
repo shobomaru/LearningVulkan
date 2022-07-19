@@ -1184,7 +1184,7 @@ void main(uint2 dtid : SV_DispatchThreadID) {
 			mSphereDescSetTex[mFrameCount % 2] = descSets[1];
 		}
 		vk::WriteDescriptorSet wdescSets[10];
-		auto descBufInfo = vk::DescriptorBufferInfo(*mUniformBuffers[mFrameCount % 2], 0, VK_WHOLE_SIZE);
+		auto descBufInfo = vk::DescriptorBufferInfo(*mUniformBuffers[mFrameCount % 2], 0, 2048);
 		auto descTexInfo = vk::DescriptorImageInfo({}, *mSailboatView, vk::ImageLayout::eShaderReadOnlyOptimal);
 		auto descSamplerInfo = vk::DescriptorImageInfo(*mSampler, {}, {});
 		wdescSets[0] = vk::WriteDescriptorSet(
@@ -1221,7 +1221,7 @@ void main(uint2 dtid : SV_DispatchThreadID) {
 			mPlaneDescSetBuf[mFrameCount % 2] = descSets[0];
 			mPlaneDescSetTex[mFrameCount % 2] = descSets[1];
 		}
-		descBufInfo = vk::DescriptorBufferInfo(*mUniformBuffers[mFrameCount % 2], 0, VK_WHOLE_SIZE);
+		descBufInfo = vk::DescriptorBufferInfo(*mUniformBuffers[mFrameCount % 2], 0, 2048);
 		descTexInfo = vk::DescriptorImageInfo({}, *mLennaView, vk::ImageLayout::eShaderReadOnlyOptimal);
 		descSamplerInfo = vk::DescriptorImageInfo(*mSampler, {}, {});
 		wdescSets[0] = vk::WriteDescriptorSet(
@@ -1427,12 +1427,12 @@ static HWND setupWindow(int width, int height)
 	}
 
 	RECT rect = { 0, 0, width, height };
-	AdjustWindowRect(&rect, WS_OVERLAPPEDWINDOW, FALSE);
+	AdjustWindowRect(&rect, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE);
 	const int windowWidth = (rect.right - rect.left);
 	const int windowHeight = (rect.bottom - rect.top);
 
 	HWND hWnd = CreateWindow(L"WindowClass", L"Window",
-		WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, 0, windowWidth, windowHeight,
+		WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, 0, windowWidth, windowHeight,
 		nullptr, nullptr, nullptr, nullptr);
 	if (!hWnd) {
 		throw runtime_error("CreateWindow()");
