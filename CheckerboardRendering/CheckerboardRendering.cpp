@@ -4,7 +4,6 @@
 // Standard MSAA x2 sample patterin is (0.75, 0.75), (0.25, 0.25)
 // so I add 1px border on checkerboard scene, and offset (0.0, 0.0), (0.5, 0.0) each frame
 // First time I have implemented using VK_EXT_sample_locations, but did not work properly on Radeon and Intel
-// and I found it's too cumbersome to modify varying PS parameters such as texcoord :(
 
 #define _WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -641,7 +640,8 @@ void main(uint2 dtid : SV_DispatchThreadID) {
 			.setLineWidth(1.0f);
 		const auto pipelineMSAAInfo = vk::PipelineMultisampleStateCreateInfo()
 			.setRasterizationSamples(vk::SampleCountFlagBits::e2)
-			.setSampleShadingEnable(VK_TRUE);
+			.setSampleShadingEnable(VK_TRUE)
+			.setMinSampleShading(1.0f); // more than 0.5 to force per sample shading on GeForce/Radeon
 		const auto pipelineDSSInfo = vk::PipelineDepthStencilStateCreateInfo()
 			.setDepthTestEnable(VK_TRUE).setDepthWriteEnable(VK_TRUE)
 			.setDepthCompareOp(vk::CompareOp::eGreaterOrEqual);
