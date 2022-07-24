@@ -27,6 +27,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Vulkan12TimelineSemaphore",
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "SpirvDiscardPixel", "SpirvDiscardPixel\SpirvDiscardPixel.vcxproj", "{920EAC84-C436-4590-813A-639AD69D8142}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Vulkan13DynamicRendering", "Vulkan13DynamicRendering\Vulkan13DynamicRendering.vcxproj", "{883A1E45-2DE5-46A7-AE54-4BD709E016CA}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -109,6 +111,12 @@ Global
 		{920EAC84-C436-4590-813A-639AD69D8142}.Release|x64.ActiveCfg = Release|x64
 		{920EAC84-C436-4590-813A-639AD69D8142}.Release|x64.Build.0 = Release|x64
 		{920EAC84-C436-4590-813A-639AD69D8142}.Release|x86.ActiveCfg = Release|x64
+		{883A1E45-2DE5-46A7-AE54-4BD709E016CA}.Debug|x64.ActiveCfg = Debug|x64
+		{883A1E45-2DE5-46A7-AE54-4BD709E016CA}.Debug|x64.Build.0 = Debug|x64
+		{883A1E45-2DE5-46A7-AE54-4BD709E016CA}.Debug|x86.ActiveCfg = Debug|x64
+		{883A1E45-2DE5-46A7-AE54-4BD709E016CA}.Release|x64.ActiveCfg = Release|x64
+		{883A1E45-2DE5-46A7-AE54-4BD709E016CA}.Release|x64.Build.0 = Release|x64
+		{883A1E45-2DE5-46A7-AE54-4BD709E016CA}.Release|x86.ActiveCfg = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
