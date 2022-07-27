@@ -1,4 +1,4 @@
-// based on SimpleMSAA.cpp
+// based on SimpleTexture.cpp
 
 #define _WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -9,6 +9,7 @@
 #include <string_view>
 #include <exception>
 #include <functional>
+#include <fstream>
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <Vulkan/vulkan.hpp>
 #include <wrl/client.h>
@@ -68,8 +69,10 @@ class VLK
 	vk::UniqueSurfaceKHR mSurface;
 	vk::UniqueDevice mDevice;
 	uint32_t mQueueFamilyGfxIdx = 0;
+	uint32_t mQueueFamilyDmaIdx = 0;
 	vk::Queue mQueue = {};
 	vk::Queue mQueuePresent = {};
+	vk::Queue mQueueDma = {};
 	vk::UniqueSwapchainKHR mSwapchain;
 	std::vector<vk::Image> mBackBuffers;
 	std::vector<vk::UniqueImageView> mBackBuffersView;
@@ -84,7 +87,8 @@ class VLK
 	vk::UniqueDescriptorPool mDescPools[2];
 
 	vk::UniqueRenderPass mRenderPass;
-	vk::UniqueDescriptorSetLayout mDescriptorSetLayout;
+	vk::UniqueDescriptorSetLayout mDescriptorSetLayoutBuf;
+	vk::UniqueDescriptorSetLayout mDescriptorSetLayoutTex;
 	vk::UniqueDescriptorSetLayout mDescriptorSetLayoutPost;
 	vk::UniquePipelineLayout mPipelineLayout;
 	vk::UniquePipelineLayout mPipelineLayoutPost;
@@ -98,12 +102,13 @@ class VLK
 	vk::UniqueImage mSceneDepth;
 	vk::UniqueDeviceMemory mSceneDepthMemory;
 	vk::UniqueImageView mSceneDepthView;
-	vk::UniqueFramebuffer mSceneFramebuffer[BUFFER_COUNT];
+	vk::UniqueFramebuffer mSceneFramebuffer[3];
 
 	struct VertexElement
 	{
 		float position[3];
 		float normal[3];
+		float texcoord[2];
 	};
 	static constexpr int SphereSlices = 12;
 	static constexpr int SphereStacks = 12;
@@ -120,8 +125,26 @@ class VLK
 	vk::UniqueDeviceMemory mUniformMemory;
 	vk::DeviceSize mUniformMemoryOffsets[2];
 
-	vk::DescriptorSet mSphereDescSet[2];
-	vk::DescriptorSet mPlaneDescSet[2];
+	vk::UniqueCommandPool mDmaCmdPool;
+	vk::UniqueCommandBuffer mDmaCmdBuf;
+	vk::UniqueSemaphore mDmaSema;
+	vk::UniqueBuffer mImageUploadBuffer;
+	vk::UniqueDeviceMemory mImageUploadMemory;
+
+	vk::UniqueImage mSailboatImg;
+	vk::UniqueImageView mSailboatView;
+	uint32_t mSailboatMipLevels;
+	vk::UniqueImage mLennaImg;
+	vk::UniqueImageView mLennaView;
+	uint32_t mLennaMipLevels;
+	vk::UniqueDeviceMemory mImagesMemory;
+
+	vk::UniqueSampler mSampler;
+
+	vk::DescriptorSet mSphereDescSetBuf[2];
+	vk::DescriptorSet mSphereDescSetTex[2];
+	vk::DescriptorSet mPlaneDescSetBuf[2];
+	vk::DescriptorSet mPlaneDescSetTex[2];
 	vk::DescriptorSet mPostDescSet[2];
 
 public:
@@ -160,7 +183,7 @@ public:
 		// Create a Vulkan instance
 		const auto appInfo = vk::ApplicationInfo(
 			"MyApp", VK_MAKE_API_VERSION(0, 0, 0, 0),
-			"LearningVulkan", VK_MAKE_API_VERSION(0, 0, 0, 0), VK_API_VERSION_1_0);
+			"LearningVulkan", VK_MAKE_API_VERSION(0, 0, 0, 0), VK_API_VERSION_1_1);
 		const auto createInfo = vk::InstanceCreateInfo(
 			vk::InstanceCreateFlags(), &appInfo,
 			layerCount, layers,
@@ -235,6 +258,26 @@ public:
 			return 0u;
 		}();
 		mQueueFamilyGfxIdx = queueGfxIdx;
+		const uint32_t queueDmaIdx = [&]() {
+			const vk::QueueFlags mask =
+				vk::QueueFlagBits::eGraphics | vk::QueueFlagBits::eCompute | vk::QueueFlagBits::eTransfer;
+			uint32_t f = ~0u;
+			for (uint32_t i = 0; i < queueFamilyProps.size(); ++i)
+			{
+				auto queueFlags = queueFamilyProps[i].queueFlags & mask;
+				if (queueFlags == vk::QueueFlagBits::eTransfer)
+				{
+					return i;
+				}
+				if (queueFlags & vk::QueueFlagBits::eTransfer)
+				{
+					f = i;
+				}
+			}
+			ASSERT(f != ~0u, "No transfer queue found");
+			return f;
+		}();
+		mQueueFamilyDmaIdx = queueDmaIdx;
 
 		// Check device extension capabilities
 		for (auto& ext : deviceExtensions)
@@ -245,20 +288,38 @@ public:
 				) != end(supportedExts), "Extension not available");
 		}
 
+		// Check device features
+		const auto features = physDevice.getFeatures();
+		const auto props = physDevice.getProperties();
+		cout << "Device Name: " << props.deviceName << endl;
+		ASSERT(features.samplerAnisotropy, "Anisotropic sampling is not supported");
+		ASSERT(props.limits.maxBoundDescriptorSets >= 4, "maxBoundDescriptorSets is insufficient");
+		ASSERT(props.limits.maxSamplerAnisotropy >= 4, "maxSamplerAnisotropy is insufficient");
+
 		// Create a device
-		float queueGfxPriority = 1.0f;
-		const vk::DeviceQueueCreateInfo deviceQueueInfo[] = {
-			{{}, queueGfxIdx, 1, &queueGfxPriority},
+		float queueDefaultPriority = 1.0f;
+		vector<vk::DeviceQueueCreateInfo> deviceQueueInfos = {
+			{{}, queueGfxIdx, 1, &queueDefaultPriority}
 		};
+		if (queueGfxIdx != queueDmaIdx) {
+			deviceQueueInfos.push_back({ {}, queueDmaIdx, 1, &queueDefaultPriority });
+		}
+		// VK_KHR_shader_draw_parameters
+		auto enableShaderDrawParam = vk::PhysicalDeviceShaderDrawParametersFeatures(1);
+		const auto enableFeatures = vk::PhysicalDeviceFeatures()
+			.setSamplerAnisotropy(1);
+		auto enableFeatures2 = vk::PhysicalDeviceFeatures2(enableFeatures)
+			.setPNext(&enableShaderDrawParam);
 		const auto deviceCreateInfo = vk::DeviceCreateInfo(
-			{}, _countof(deviceQueueInfo), deviceQueueInfo,
+			{}, (uint32_t)deviceQueueInfos.size(), deviceQueueInfos.data(),
 			0, nullptr, _countof(deviceExtensions), deviceExtensions
-		);
+		).setPNext(&enableFeatures2);
 		mDevice = physDevice.createDeviceUnique(deviceCreateInfo);
 
 		// Get device queues
 		mQueue = mDevice->getQueue(queueGfxIdx, 0);
 		mQueuePresent = mDevice->getQueue(queueGfxIdx, 0);
+		mQueueDma = mDevice->getQueue(queueDmaIdx, 0);
 
 		// Check surface format
 		const auto surfaceFormat = vk::Format::eB8G8R8A8Unorm;
@@ -316,7 +377,8 @@ public:
 		// Create descriptor pools
 		const auto descPoolSizes = {
 			vk::DescriptorPoolSize(vk::DescriptorType::eUniformBuffer, 100),
-			vk::DescriptorPoolSize(vk::DescriptorType::eInputAttachment, 10),
+			vk::DescriptorPoolSize(vk::DescriptorType::eSampledImage, 100),
+			vk::DescriptorPoolSize(vk::DescriptorType::eSampler, 10),
 		};
 		for (auto& p : mDescPools)
 		{
@@ -324,46 +386,48 @@ public:
 		}
 
 		// Create a render pass
-		const auto msaaSampleCount = vk::SampleCountFlagBits::e4;
+		const auto sceneFormat = vk::Format::eB10G11R11UfloatPack32;
 		const auto colorAttachmentDesc = vk::AttachmentDescription(
-			{}, surfaceFormat, msaaSampleCount,
-			vk::AttachmentLoadOp::eClear, vk::AttachmentStoreOp::eDontCare,
+			{}, sceneFormat, vk::SampleCountFlagBits::e1,
+			vk::AttachmentLoadOp::eClear, vk::AttachmentStoreOp::eStore,
 			vk::AttachmentLoadOp::eDontCare, vk::AttachmentStoreOp::eDontCare,
-			vk::ImageLayout::eUndefined, vk::ImageLayout::eColorAttachmentOptimal
+			vk::ImageLayout::eUndefined, vk::ImageLayout::eShaderReadOnlyOptimal
 		);
 		const auto depthAttachmentDesc = vk::AttachmentDescription(
-			{}, vk::Format::eD32Sfloat, msaaSampleCount,
+			{}, vk::Format::eD32Sfloat, vk::SampleCountFlagBits::e1,
 			vk::AttachmentLoadOp::eClear, vk::AttachmentStoreOp::eDontCare,
 			vk::AttachmentLoadOp::eDontCare, vk::AttachmentStoreOp::eDontCare,
 			vk::ImageLayout::eUndefined, vk::ImageLayout::eDepthStencilAttachmentOptimal
 		);
-		const auto resolveAttachmentDesc = vk::AttachmentDescription(
+		const auto postAttachmentDesc = vk::AttachmentDescription(
 			{}, surfaceFormat, vk::SampleCountFlagBits::e1,
 			vk::AttachmentLoadOp::eDontCare, vk::AttachmentStoreOp::eStore,
 			vk::AttachmentLoadOp::eDontCare, vk::AttachmentStoreOp::eDontCare,
 			vk::ImageLayout::eUndefined, vk::ImageLayout::ePresentSrcKHR
 		);
-		const auto attachmentsDesc = { colorAttachmentDesc ,depthAttachmentDesc, resolveAttachmentDesc };
+		const auto attachmentsDesc = {
+			colorAttachmentDesc, depthAttachmentDesc, postAttachmentDesc
+		};
 		const auto colorAttachmentRef = vk::AttachmentReference(
 			0, vk::ImageLayout::eColorAttachmentOptimal
 		);
 		const auto depthAttachmentRef = vk::AttachmentReference(
 			1, vk::ImageLayout::eDepthStencilAttachmentOptimal
 		);
-		const auto inputAttachmentRef = vk::AttachmentReference(
+		const auto colorReadAttachmentRef = vk::AttachmentReference(
 			0, vk::ImageLayout::eShaderReadOnlyOptimal
 		);
-		const auto resolveAttachmentRef = vk::AttachmentReference(
+		const auto postAttachmentRef = vk::AttachmentReference(
 			2, vk::ImageLayout::eColorAttachmentOptimal
 		);
-		const array<vk::SubpassDescription, 2> subpassDescs = {
-			// Pass1: Draw MSAA target
+		const auto subpassDescs = {
+			// Pass1: Forward lighting
 			vk::SubpassDescription(
-				{}, vk::PipelineBindPoint::eGraphics, {}, colorAttachmentRef, nullptr, &depthAttachmentRef
+				{}, vk::PipelineBindPoint::eGraphics, {}, colorAttachmentRef, {}, &depthAttachmentRef
 			),
-			// Pass2: Post processing
+			// Pass2: Post process (Tone mapping, sRGB conversion)
 			vk::SubpassDescription(
-				{}, vk::PipelineBindPoint::eGraphics, inputAttachmentRef, resolveAttachmentRef, nullptr, nullptr
+				{}, vk::PipelineBindPoint::eGraphics, colorReadAttachmentRef, postAttachmentRef, {}
 			),
 		};
 		const auto subpassDeps = vk::SubpassDependency(
@@ -376,14 +440,37 @@ public:
 			vk::RenderPassCreateInfo({}, attachmentsDesc, subpassDescs, subpassDeps)
 		);
 
-		// Create descriptor sets
-		const auto descriptorBinding = vk::DescriptorSetLayoutBinding(
-			0, vk::DescriptorType::eUniformBuffer, 1, vk::ShaderStageFlagBits::eVertex
-		);
-		const auto descriptorSetLayoutInfo = vk::DescriptorSetLayoutCreateInfo(
-			{}, descriptorBinding
-		);
-		mDescriptorSetLayout = mDevice->createDescriptorSetLayoutUnique(descriptorSetLayoutInfo);
+		// Create descriptor set layouts
+		// Set 0
+		{
+			const auto descriptorBinding = {
+				vk::DescriptorSetLayoutBinding(
+					0, vk::DescriptorType::eUniformBuffer, 1, vk::ShaderStageFlagBits::eVertex
+				),
+				vk::DescriptorSetLayoutBinding(
+					10, vk::DescriptorType::eUniformBuffer, 1, vk::ShaderStageFlagBits::eFragment
+				),
+			};
+			const auto descriptorSetLayoutInfo = vk::DescriptorSetLayoutCreateInfo(
+				{}, descriptorBinding
+			);
+			mDescriptorSetLayoutBuf = mDevice->createDescriptorSetLayoutUnique(descriptorSetLayoutInfo);
+		}
+		// Set 1
+		{
+			const auto descriptorBinding = {
+				vk::DescriptorSetLayoutBinding(
+					0, vk::DescriptorType::eSampledImage, 1, vk::ShaderStageFlagBits::eFragment
+				),
+				vk::DescriptorSetLayoutBinding(
+					1, vk::DescriptorType::eSampler, 1, vk::ShaderStageFlagBits::eFragment
+				),
+			};
+			const auto descriptorSetLayoutInfo = vk::DescriptorSetLayoutCreateInfo(
+				{}, descriptorBinding
+			);
+			mDescriptorSetLayoutTex = mDevice->createDescriptorSetLayoutUnique(descriptorSetLayoutInfo);
+		}
 
 		const auto descriptorBindingPost = vk::DescriptorSetLayoutBinding(
 			0, vk::DescriptorType::eInputAttachment, 1, vk::ShaderStageFlagBits::eFragment
@@ -394,8 +481,9 @@ public:
 		mDescriptorSetLayoutPost = mDevice->createDescriptorSetLayoutUnique(descriptorSetLayoutInfoPost);
 
 		// Create pipeline layouts
+		const auto pipelineDescSets = { *mDescriptorSetLayoutBuf, *mDescriptorSetLayoutTex };
 		mPipelineLayout = mDevice->createPipelineLayoutUnique(
-			vk::PipelineLayoutCreateInfo({}, *mDescriptorSetLayout)
+			vk::PipelineLayoutCreateInfo({}, pipelineDescSets)
 		);
 		mPipelineLayoutPost = mDevice->createPipelineLayoutUnique(
 			vk::PipelineLayoutCreateInfo({}, *mDescriptorSetLayoutPost)
@@ -405,33 +493,93 @@ public:
 		static const char shaderCodeSceneVS[] = R"#(
 [[vk::binding(0, 0)]] cbuffer CScene {
 	float4x4 ViewProj;
+	float4x4 Model[1 + 12];
+	float2 Metallic;
+	float2 Roughness;
 };
 struct Output {
 	float4 position : SV_Position;
 	float3 world : WorldPosition;
 	float3 normal : Normal;
+	float2 texcoord : Texcoord;
+	float metallic : Metallic;
+	float roughness : Roughness;
 };
-Output main(float3 position : Position, float3 normal : Normal) {
+Output main(uint instanceID : SV_InstanceID, [[vk::builtin("BaseInstance")]] uint baseInstanceID : BaseInstanceID,
+			 float3 position : Position, float3 normal : Normal, float2 texcoord : Texcoord) {
+	float4 wpos = mul(float4(position, 1), Model[instanceID + baseInstanceID]);
 	Output output;
-	output.position = mul(float4(position, 1), ViewProj);
-	output.world = position;
-	output.normal = normalize(normal);
+	output.position = mul(wpos, ViewProj);
+	output.world = wpos.xyz / wpos.w;
+	output.normal = normalize(mul(normal, (float3x3)Model[instanceID + baseInstanceID]));
+	output.texcoord = texcoord;
+	output.metallic = lerp(Metallic[0], Metallic[1], (float)(instanceID / 6));
+	output.roughness = lerp(Roughness[0], Roughness[1], (float)(instanceID % 6) / 5);
 	return output;
 }
 )#";
 
 		static const char shaderCodeScenePS[] = R"#(
+[[vk::binding(10, 0)]] cbuffer CLight {
+	float3 CameraPosition;
+	float3 SunLightIntensity;
+	float3 SunLightDirection;
+};
+[[vk::binding(0, 1)]] Texture2D Tex;
+[[vk::binding(1, 1)]] SamplerState SS;
 struct Input {
 	float4 position : SV_Position;
 	float3 world : WorldPosition;
 	float3 normal : Normal;
+	float2 texcoord : Texcoord;
+	float metallic : Metallic;
+	float roughness : Roughness;
 };
+// https://google.github.io/filament/Filament.html
+#define PI (3.14159265f)
+#define F0 (0.04f)
+float D_GGX(float NoH, float a) {
+	float a2 = a * a;
+	float f = (NoH * a2 - NoH) * NoH + 1.0;
+	return a2 / (PI * f * f);
+}
+float V_SmithGGXCorrelated(float NoV, float NoL, float roughness) {
+	float a2 = roughness * roughness;
+	float GGXV = NoL * sqrt(NoV * NoV * (1.0 - a2) + a2);
+	float GGXL = NoV * sqrt(NoL * NoL * (1.0 - a2) + a2);
+	return 0.5 / (GGXV + GGXL);
+}
+float F_Schlick(float u, float f0, float f90 = 1.0) {
+	return f0 + (1.0 - f0) * pow(1.0 - u, 5.0);
+}
+float Fd_Burley(float NoV, float NoL, float LoH, float roughness) {
+	float f90 = 0.5 + 2.0 * roughness * LoH * LoH;
+	float lightScatter = F_Schlick(NoL, 1.0, f90);
+	float viewScatter = F_Schlick(NoV, 1.0, f90);
+	return lightScatter * viewScatter * (1.0 / PI);
+}
 float4 main(Input input) : SV_Target {
-	float4 color = float4(input.normal.xyz * 0.5 + 0.5, 1.0);
-	return color;
+	input.normal = normalize(input.normal);
+	float3 viewDir = normalize(CameraPosition - input.world);
+	float3 halfVector = normalize(viewDir + SunLightDirection);
+	float dotNV = abs(dot(input.normal, viewDir)) + 1e-5;
+	float dotNL = saturate(dot(input.normal, SunLightDirection));
+	float dotNH = saturate(dot(input.normal, halfVector));
+	float dotLH = saturate(dot(SunLightDirection, halfVector));
+	float roughness = input.roughness * input.roughness;
+	float termD = D_GGX(dotNH, roughness);
+	float termV = V_SmithGGXCorrelated(dotNV, dotNL, roughness);
+	float termF = F_Schlick(F0, dotLH);
+	float3 Fr = termD * termV * termF;
+	float3 Fd = Fd_Burley(dotNV, dotNL, dotLH, roughness);
+	float3 F = (input.metallic > 0.0) ? Fr : Fd;
+
+	float4 color = Tex.Sample(SS, input.texcoord);
+	float3 lit = SunLightIntensity * F * color.rgb * dotNL;
+	return float4(lit, 1.0);
 }
 )#";
-		
+
 		static const char shaderCodePostVS[] = R"#(
 float4 main(uint vid : SV_VertexID) : SV_Position {
 	return float4((vid & 1) ? 3 : -1, (vid & 2) ? -3 : 1, 0, 1);
@@ -439,12 +587,28 @@ float4 main(uint vid : SV_VertexID) : SV_Position {
 )#";
 
 		static const char shaderCodePostPS[] = R"#(
-[[vk::input_attachment_index(0)]] SubpassInputMS Input;
+[[vk::input_attachment_index(0)]] SubpassInput Input;
+float luminance(float3 rgb) {
+	return dot(rgb, float3(0.2, 0.7, 0.1));
+}
+float3 tonemapping(float3 z) {
+	float a = 0.15, b = 0.50, c = 0.10, d = 0.20, e = 0.02, f = 0.30, w = 11.2;
+	return ((z * (a * z + c * b) + d * e) / (z * (a * z + b) + d * f)) - e / f;
+}
+float3 linearToSrgb(float3 lin) {
+	lin = saturate(lin);
+	float3 s1 = 1.055 * pow(lin, 1 / 2.4) - 0.055;
+	float3 s2 = lin * 12.92;
+	return step(lin, 0.0031308) * s2 + (step(lin, 0.0031308) ? 0 : 1) * s1;
+}
 float4 main() : SV_Target {
-	float4 b = (Input.SubpassLoad(0) + Input.SubpassLoad(1) + Input.SubpassLoad(2) + Input.SubpassLoad(3)) / 4;
-	return b * 0.5
-		+ abs(Input.SubpassLoad(0) - Input.SubpassLoad(1))
-		+ abs(Input.SubpassLoad(2) - Input.SubpassLoad(3));
+	float3 color = Input.SubpassLoad().rgb;
+	float exposure = exp2(2.0); // fixed
+	float lum = luminance(color);
+	float3 sat = color / max(lum, 0.00001);
+	color = sat * tonemapping(exposure * lum);
+	color = linearToSrgb(color);
+	return float4(color, 1);
 }
 )#";
 
@@ -465,7 +629,7 @@ float4 main() : SV_Target {
 		ComPtr<IDxcBlobEncoding> dxcError;
 		ComPtr<IDxcOperationResult> dxcRes;
 		const wchar_t* shaderArgsVS[] = {
-			L"-Zi", L"-all_resources_bound", L"-Qembed_debug", L"-spirv", L"-fvk-invert-y"
+			L"-Zi", L"-all_resources_bound", L"-Qembed_debug", L"-spirv", L"-fvk-invert-y", L"-fvk-support-nonzero-base-instance",
 		};
 		const wchar_t* shaderArgsPS[] = {
 			L"-Zi", L"-all_resources_bound", L"-Qembed_debug", L"-spirv", L"-fvk-use-dx-position-w"
@@ -485,7 +649,6 @@ float4 main() : SV_Target {
 			throw runtime_error("Shader compile error.");
 		}
 		dxcRes->GetResult(&dxcBlobScenePS);
-
 		dxc->Compile(dxcTxtPostVS.Get(), nullptr, L"main", L"vs_6_0", shaderArgsVS, _countof(shaderArgsVS), nullptr, 0, nullptr, &dxcRes);
 		dxcRes->GetErrorBuffer(&dxcError);
 		if (dxcError->GetBufferSize()) {
@@ -507,7 +670,6 @@ float4 main() : SV_Target {
 		const auto psCreateInfo = vk::ShaderModuleCreateInfo(
 			{}, dxcBlobScenePS->GetBufferSize(), reinterpret_cast<uint32_t*>(dxcBlobScenePS->GetBufferPointer()));
 		auto fsModule = mDevice->createShaderModuleUnique(psCreateInfo);
-
 		const auto vsPostCreateInfo = vk::ShaderModuleCreateInfo(
 			{}, dxcBlobPostVS->GetBufferSize(), reinterpret_cast<uint32_t*>(dxcBlobPostVS->GetBufferPointer()));
 		auto vsPostModule = mDevice->createShaderModuleUnique(vsPostCreateInfo);
@@ -521,10 +683,11 @@ float4 main() : SV_Target {
 			vk::PipelineShaderStageCreateInfo({}, vk::ShaderStageFlagBits::eFragment, *fsModule, "main"),
 		};
 		const auto vertexInputBindingDesc
-			= vk::VertexInputBindingDescription(0, 24, vk::VertexInputRate::eVertex);
+			= vk::VertexInputBindingDescription(0, 32, vk::VertexInputRate::eVertex);
 		const auto vertexInputAttrsDesc = {
 			vk::VertexInputAttributeDescription(0, 0, vk::Format::eR32G32B32Sfloat, 0),
 			vk::VertexInputAttributeDescription(1, 0, vk::Format::eR32G32B32Sfloat, 12),
+			vk::VertexInputAttributeDescription(2, 0, vk::Format::eR32G32Sfloat, 24),
 		};
 		const auto pipelineVertexInputsInfo = vk::PipelineVertexInputStateCreateInfo(
 			{}, vertexInputBindingDesc, vertexInputAttrsDesc
@@ -539,8 +702,7 @@ float4 main() : SV_Target {
 			.setCullMode(vk::CullModeFlagBits::eBack)
 			.setFrontFace(vk::FrontFace::eClockwise)
 			.setLineWidth(1.0f);
-		const auto pipelineMSAAInfo = vk::PipelineMultisampleStateCreateInfo()
-			.setRasterizationSamples(msaaSampleCount);
+		const auto pipelineMSAAInfo = vk::PipelineMultisampleStateCreateInfo();
 		const auto pipelineDSSInfo = vk::PipelineDepthStencilStateCreateInfo()
 			.setDepthTestEnable(VK_TRUE).setDepthWriteEnable(VK_TRUE)
 			.setDepthCompareOp(vk::CompareOp::eGreaterOrEqual);
@@ -557,7 +719,7 @@ float4 main() : SV_Target {
 		const auto pipelineInfo = vk::GraphicsPipelineCreateInfo(
 			{}, pipelineShadersInfo, &pipelineVertexInputsInfo, &pipelineInputAssemblyStateInfo,
 			nullptr, &viewportStateInfo, &pipelineRSInfo, &pipelineMSAAInfo, &pipelineDSSInfo,
-			&pipelineBSInfo, &pipelineDynamicStatesInfo, *mPipelineLayout, *mRenderPass, 0
+			&pipelineBSInfo, &pipelineDynamicStatesInfo, *mPipelineLayout, *mRenderPass
 		);
 		auto vkres = mDevice->createGraphicsPipelineUnique(nullptr, pipelineInfo);
 		CHK(vkres.result);
@@ -567,12 +729,11 @@ float4 main() : SV_Target {
 			vk::PipelineShaderStageCreateInfo({}, vk::ShaderStageFlagBits::eVertex, *vsPostModule, "main"),
 			vk::PipelineShaderStageCreateInfo({}, vk::ShaderStageFlagBits::eFragment, *fsPostModule, "main"),
 		};
-		const auto pipelinePostMSAAInfo = vk::PipelineMultisampleStateCreateInfo();
 		const auto pipelinePostDSSInfo = vk::PipelineDepthStencilStateCreateInfo();
 		const auto pipelinePostInfo = vk::GraphicsPipelineCreateInfo(
 			{}, pipelinePostShadersInfo, &pipelineVertexInputsInfo, &pipelineInputAssemblyStateInfo,
-			nullptr, &viewportStateInfo, &pipelineRSInfo, &pipelinePostMSAAInfo, &pipelinePostDSSInfo,
-			&pipelineBSInfo, &pipelineDynamicStatesInfo, * mPipelineLayoutPost, *mRenderPass, 1
+			nullptr, &viewportStateInfo, &pipelineRSInfo, &pipelineMSAAInfo, &pipelinePostDSSInfo,
+			&pipelineBSInfo, &pipelineDynamicStatesInfo, *mPipelineLayoutPost, *mRenderPass, 1
 		);
 		vkres = mDevice->createGraphicsPipelineUnique(nullptr, pipelinePostInfo);
 		CHK(vkres.result);
@@ -602,8 +763,8 @@ float4 main() : SV_Target {
 
 		// Create a color buffer
 		mSceneColor = mDevice->createImageUnique(vk::ImageCreateInfo(
-			{}, vk::ImageType::e2D, surfaceFormat, vk::Extent3D(width, height, 1),
-			1, 1, msaaSampleCount, vk::ImageTiling::eOptimal,
+			{}, vk::ImageType::e2D, sceneFormat, vk::Extent3D(width, height, 1),
+			1, 1, vk::SampleCountFlagBits::e1, vk::ImageTiling::eOptimal,
 			vk::ImageUsageFlagBits::eColorAttachment
 			| vk::ImageUsageFlagBits::eInputAttachment // Subpass load
 			| vk::ImageUsageFlagBits::eTransientAttachment // Store temporary data
@@ -617,14 +778,14 @@ float4 main() : SV_Target {
 		));
 		mDevice->bindImageMemory(*mSceneColor, *mSceneColorMemory, 0);
 		mSceneColorView = mDevice->createImageViewUnique(vk::ImageViewCreateInfo(
-			{}, *mSceneColor, vk::ImageViewType::e2D, surfaceFormat, {},
+			{}, *mSceneColor, vk::ImageViewType::e2D, sceneFormat, {},
 			vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1)
 		));
 
 		// Create a depth buffer
 		mSceneDepth = mDevice->createImageUnique(vk::ImageCreateInfo(
 			{}, vk::ImageType::e2D, vk::Format::eD32Sfloat, vk::Extent3D(width, height, 1),
-			1, 1, msaaSampleCount, vk::ImageTiling::eOptimal,
+			1, 1, vk::SampleCountFlagBits::e1, vk::ImageTiling::eOptimal,
 			vk::ImageUsageFlagBits::eDepthStencilAttachment
 			| vk::ImageUsageFlagBits::eTransientAttachment // Store temporary data
 		).setInitialLayout(vk::ImageLayout::eUndefined)
@@ -671,6 +832,9 @@ float4 main() : SV_Target {
 				ve.normal[0] = ve.position[0] / r;
 				ve.normal[1] = ve.position[1] / r;
 				ve.normal[2] = ve.position[2] / r;
+				// Setup uv
+				ve.texcoord[0] = (float)x / SphereSlices;
+				ve.texcoord[1] = (float)y / SphereStacks;
 				vertices.push_back(ve);
 			}
 		}
@@ -712,10 +876,10 @@ float4 main() : SV_Target {
 		// Generate a plane
 		vertices.clear();
 		indices.clear();
-		vertices.push_back({ -1, -1, +1,  0, +1,  0 });
-		vertices.push_back({ +1, -1, +1,  0, +1,  0 });
-		vertices.push_back({ -1, -1, -1,  0, +1,  0 });
-		vertices.push_back({ +1, -1, -1,  0, +1,  0 });
+		vertices.push_back({ -1, -1, +1,  0, +1,  0, 0, 0 });
+		vertices.push_back({ +1, -1, +1,  0, +1,  0, 1, 0 });
+		vertices.push_back({ -1, -1, -1,  0, +1,  0, 0, 1 });
+		vertices.push_back({ +1, -1, -1,  0, +1,  0, 1, 1 });
 		for (auto& v : vertices) { v.position[0] *= 3; v.position[1] *= 3; v.position[2] *= 3; }
 		indices.push_back({ 0, 1, 2, 2, 1, 3 });
 
@@ -760,6 +924,213 @@ float4 main() : SV_Target {
 			mDevice->bindBufferMemory(*mUniformBuffers[i], *mUniformMemory, ofs);
 			mUniformMemoryOffsets[i] = ofs;
 		}
+
+		// Prepare a transfer command and a buffer
+		mDmaCmdPool = mDevice->createCommandPoolUnique(
+			vk::CommandPoolCreateInfo(
+				vk::CommandPoolCreateFlagBits::eTransient | vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
+				queueDmaIdx));
+		mDmaCmdBuf = move(mDevice->allocateCommandBuffersUnique(vk::CommandBufferAllocateInfo(
+			*mDmaCmdPool, vk::CommandBufferLevel::ePrimary, 1))[0]);
+		mDmaSema = mDevice->createSemaphoreUnique({});
+		mImageUploadBuffer = mDevice->createBufferUnique(vk::BufferCreateInfo(
+			{}, 8 * 1024 * 1024, vk::BufferUsageFlagBits::eTransferSrc
+		));
+		const auto imageUploadMemReq = mDevice->getBufferMemoryRequirements(*mImageUploadBuffer);
+		mImageUploadMemory = mDevice->allocateMemoryUnique(vk::MemoryAllocateInfo(
+			imageUploadMemReq.size, GetMemTypeIndex(imageUploadMemReq, true)
+		));
+		mDevice->bindBufferMemory(*mImageUploadBuffer, *mImageUploadMemory, 0);
+
+		// Create a sampler
+		mSampler = mDevice->createSamplerUnique(vk::SamplerCreateInfo(
+			{}, vk::Filter::eLinear, vk::Filter::eLinear, vk::SamplerMipmapMode::eLinear,
+			vk::SamplerAddressMode::eClampToEdge, vk::SamplerAddressMode::eClampToEdge, vk::SamplerAddressMode::eClampToEdge,
+			0.0f, VK_TRUE, 4.0f, VK_FALSE, {}, 0.0f, VK_LOD_CLAMP_NONE
+		));
+
+		// Load images and generate mipmaps
+		struct ImageData
+		{
+			vk::Extent3D extent;
+			uint32_t size;
+			unique_ptr<uint8_t[]> data;
+		};
+		auto loadBitmap = [&](const char* path)
+		{
+			ifstream ifs(path, ios::binary);
+			BITMAPFILEHEADER fileHeader = {};
+			ifs.read(reinterpret_cast<char*>(&fileHeader), sizeof(fileHeader));
+			ASSERT(fileHeader.bfType == 0x4D42, "Invalid BMP format");
+			BITMAPINFOHEADER header;
+			ifs.read(reinterpret_cast<char*>(&header), sizeof(header));
+			auto oneline = make_unique<uint8_t[]>(header.biWidth * 3); // rgb
+			auto data = make_unique<uint8_t[]>(header.biWidth * header.biHeight * 4); // rgba
+			for (int y = 0; y < header.biHeight; y++)
+			{
+				ifs.read(reinterpret_cast<char*>(oneline.get()), header.biWidth * 3);
+				for (int x = 0; x < header.biWidth; ++x)
+				{
+					const int p = (header.biHeight - 1 - y) * header.biWidth + x;
+					data[p * 4] = oneline[x * 3 + 2];
+					data[p * 4 + 1] = oneline[x * 3 + 1];
+					data[p * 4 + 2] = oneline[x * 3];
+					data[p * 4 + 3] = '\xFF';
+				}
+			}
+			return ImageData{
+				vk::Extent3D(header.biWidth, header.biHeight, 1),
+				uint32_t(4 * header.biWidth * header.biHeight),
+				move(data) };
+		};
+		auto generateMipmap = [](ImageData&& mip0)
+		{
+			auto downsample = [](const ImageData& high)
+			{
+				const auto ext = vk::Extent3D(max(1u, high.extent.width / 2), max(1u, high.extent.height / 2), 1);
+				auto data = make_unique<uint8_t[]>(ext.width * ext.height * 4);
+				for (uint32_t y = 0; y < ext.height; ++y)
+				{
+					for (uint32_t x = 0; x < ext.width; ++x)
+					{
+						const auto pd = y * ext.width + x;
+						const auto ps = 2 * y * 2 * ext.width + 2 * x;
+						for (int c = 0; c < 4; ++c)
+						{
+
+							uint32_t d = high.data[ps * 4 + c];
+							d += high.data[ps * 4 + 1 * 4 + c];
+							d += high.data[ps * 4 + high.extent.width * 4 + c];
+							d += high.data[ps * 4 + high.extent.width * 4 + 1 * 4 + c];
+							data[pd * 4 + c] = static_cast<uint8_t>((d + 2) / 4);
+						}
+					}
+				}
+				return ImageData{ ext, uint32_t(ext.width * ext.height * 4), move(data) };
+			};
+			vector<ImageData> v;
+			v.push_back(ImageData{ mip0.extent, mip0.size, move(mip0.data) });
+			while (v.rbegin()->extent.width != 1 || v.rbegin()->extent.height != 1)
+			{
+				v.push_back(downsample(*v.rbegin()));
+			}
+			return v;
+		};
+		auto sailboatData = generateMipmap(loadBitmap("../res/Sailboat.bmp"));
+		auto lennaData = generateMipmap(loadBitmap("../res/Lenna.bmp"));
+		mSailboatMipLevels = (uint32_t)sailboatData.size();
+		mLennaMipLevels = (uint32_t)lennaData.size();
+
+		// Create images
+		mSailboatImg = mDevice->createImageUnique(vk::ImageCreateInfo(
+			{}, vk::ImageType::e2D, vk::Format::eR8G8B8A8Unorm, sailboatData[0].extent,
+			mSailboatMipLevels, 1, vk::SampleCountFlagBits::e1, vk::ImageTiling::eOptimal,
+			vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
+			vk::SharingMode::eExclusive, {}, vk::ImageLayout::eUndefined
+		));
+		const auto sailboatMemReq = mDevice->getImageMemoryRequirements(*mSailboatImg);
+		mLennaImg = mDevice->createImageUnique(vk::ImageCreateInfo(
+			{}, vk::ImageType::e2D, vk::Format::eR8G8B8A8Unorm, lennaData[0].extent,
+			mLennaMipLevels, 1, vk::SampleCountFlagBits::e1, vk::ImageTiling::eOptimal,
+			vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
+			vk::SharingMode::eExclusive, {}, vk::ImageLayout::eUndefined
+		));
+		const auto lennaMemReq = mDevice->getImageMemoryRequirements(*mLennaImg);
+		mImagesMemory = mDevice->allocateMemoryUnique(vk::MemoryAllocateInfo(
+			ALIGN(sailboatMemReq.size, lennaMemReq.alignment) + lennaMemReq.size,
+			GetMemTypeIndex(sailboatMemReq, false)
+		));
+		mDevice->bindImageMemory(*mSailboatImg, *mImagesMemory, 0);
+		mDevice->bindImageMemory(*mLennaImg, *mImagesMemory, (uint64_t)ALIGN(sailboatMemReq.size, lennaMemReq.alignment));
+		mSailboatView = mDevice->createImageViewUnique(vk::ImageViewCreateInfo(
+			{}, *mSailboatImg, vk::ImageViewType::e2D, vk::Format::eR8G8B8A8Unorm, {},
+			vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, mSailboatMipLevels, 0, 1)
+		));
+		mLennaView = mDevice->createImageViewUnique(vk::ImageViewCreateInfo(
+			{}, *mLennaImg, vk::ImageViewType::e2D, vk::Format::eR8G8B8A8Unorm, {},
+			vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, mLennaMipLevels, 0, 1)
+		));
+
+		// Upload image data
+		pData = reinterpret_cast<uint8_t*>(mDevice->mapMemory(*mImageUploadMemory, 0, VK_WHOLE_SIZE));
+		for (int i = 0; i < sailboatData.size(); ++i)
+		{
+			memcpy(pData, sailboatData[i].data.get(), sailboatData[i].size);
+			pData += sailboatData[i].size;
+		}
+		for (int i = 0; i < lennaData.size(); ++i)
+		{
+			memcpy(pData, lennaData[i].data.get(), lennaData[i].size);
+			pData += lennaData[i].size;
+		}
+		mDevice->unmapMemory(*mImageUploadMemory);
+
+		// Setup an image transfer command
+		mDmaCmdBuf->begin(vk::CommandBufferBeginInfo(vk::CommandBufferUsageFlagBits::eOneTimeSubmit));
+		const auto barriers = {
+			vk::ImageMemoryBarrier(
+				{}, vk::AccessFlagBits::eTransferWrite,
+				vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal,
+				mQueueFamilyDmaIdx, mQueueFamilyDmaIdx, *mSailboatImg,
+				vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, mSailboatMipLevels, 0, 1)
+			),
+			vk::ImageMemoryBarrier(
+				{}, vk::AccessFlagBits::eTransferWrite,
+				vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal,
+				mQueueFamilyDmaIdx, mQueueFamilyDmaIdx, *mLennaImg,
+				vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, mLennaMipLevels, 0, 1)
+			),
+		};
+		mDmaCmdBuf->pipelineBarrier(
+			vk::PipelineStageFlagBits::eBottomOfPipe, vk::PipelineStageFlagBits::eTransfer, {},
+			{}, {}, barriers);
+		size_t bufferOffset = 0;
+		for (int i = 0; i < sailboatData.size(); ++i)
+		{
+			mDmaCmdBuf->copyBufferToImage(
+				*mImageUploadBuffer, *mSailboatImg, vk::ImageLayout::eTransferDstOptimal,
+				vk::BufferImageCopy(
+					bufferOffset, 0, 0,
+					vk::ImageSubresourceLayers(vk::ImageAspectFlagBits::eColor, i, 0, 1), {}, sailboatData[i].extent));
+			bufferOffset += sailboatData[i].size;
+		}
+		for (int i = 0; i < lennaData.size(); ++i)
+		{
+			mDmaCmdBuf->copyBufferToImage(
+				*mImageUploadBuffer, *mLennaImg, vk::ImageLayout::eTransferDstOptimal,
+				vk::BufferImageCopy(
+					bufferOffset, 0, 0,
+					vk::ImageSubresourceLayers(vk::ImageAspectFlagBits::eColor, i, 0, 1), {}, lennaData[i].extent));
+			bufferOffset += lennaData[i].size;
+		}
+		// Release exclusive ownership if (mQueueFamilyDmaIdx != mQueueFamilyGfxIdx)
+		const auto barriers2 = {
+			vk::ImageMemoryBarrier(
+				vk::AccessFlagBits::eTransferWrite, {},
+				vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eShaderReadOnlyOptimal,
+				mQueueFamilyDmaIdx, mQueueFamilyGfxIdx, *mSailboatImg,
+				vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, mSailboatMipLevels, 0, 1)
+			),
+			vk::ImageMemoryBarrier(
+				vk::AccessFlagBits::eTransferWrite, {},
+				vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eShaderReadOnlyOptimal,
+				mQueueFamilyDmaIdx, mQueueFamilyGfxIdx, *mLennaImg,
+				vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, mLennaMipLevels, 0, 1)
+			),
+		};
+		mDmaCmdBuf->pipelineBarrier(
+			vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eBottomOfPipe, {},
+			{}, {}, barriers2);
+		mDmaCmdBuf->end();
+
+		// Execute a transfer command
+		const auto submitInfo = vk::SubmitInfo({}, {}, *mDmaCmdBuf, *mDmaSema);
+		mQueueDma.submit(submitInfo, VK_NULL_HANDLE);
+
+		// Wait a grapihcs queue
+		const vk::PipelineStageFlags submitPipelineStage = vk::PipelineStageFlagBits::eBottomOfPipe;
+		const auto submitInfoGfx = vk::SubmitInfo(*mDmaSema, submitPipelineStage, {}, {});
+		mQueue.submit(submitInfoGfx, VK_NULL_HANDLE);
 	}
 
 	void Draw()
@@ -782,14 +1153,43 @@ float4 main() : SV_Target {
 		auto nearClip = 0.01f;
 		auto farClip = 100.0f;
 
-		auto worldMat = DirectX::XMMatrixIdentity();
 		auto viewMat = DirectX::XMMatrixLookAtLH(mCameraPos, mCameraTarget, mCameraUp);
 		auto projMat = DirectX::XMMatrixPerspectiveFovLH(fov, aspect, farClip, nearClip); // Reversed depth
 
-		auto wvpMat = DirectX::XMMatrixTranspose(worldMat * viewMat * projMat);
+		auto vpMat = DirectX::XMMatrixTranspose(viewMat * projMat);
 
-		void* pUB = mDevice->mapMemory(*mUniformMemory, mUniformMemoryOffsets[mFrameCount % 2], UniformBufferSize);
-		*reinterpret_cast<decltype(&wvpMat)>(pUB) = wvpMat;
+		struct CBuffer
+		{
+			DirectX::XMMATRIX ViewProj;
+			DirectX::XMMATRIX Model[1 + 12];
+			DirectX::XMVECTOR Metallic_Roughness;
+		} cbufBuf;
+		cbufBuf.ViewProj = vpMat;
+		cbufBuf.Model[0] = DirectX::XMMatrixIdentity();
+		for (int i = 0; i < 12; ++i)
+		{
+			float x = (float)(i % 6) * 1.1f - 3.3f + 0.65f;
+			float y = (float)(i / 6) * 1.1f + 1.f;
+			float s = 0.5f;
+			cbufBuf.Model[1 + i] = DirectX::XMMatrixTranspose(
+				DirectX::XMMatrixMultiply(DirectX::XMMatrixScaling(s, s, s) ,DirectX::XMMatrixTranslation(x, y, 0))
+			);
+		};
+		cbufBuf.Metallic_Roughness = DirectX::XMVectorSet(0, 1, 0.05f, 0.95f);
+
+		struct CLight
+		{
+			DirectX::XMVECTOR CameraPosition;
+			DirectX::XMVECTOR SunLightIntensity;
+			DirectX::XMVECTOR SunLightDirection;
+		} cbufLight;
+		cbufLight.CameraPosition = mCameraPos;
+		cbufLight.SunLightIntensity = DirectX::XMVectorSet(3.0f, 3.0f, 3.0f, 1.0f);
+		cbufLight.SunLightDirection = DirectX::XMVector3Normalize(DirectX::XMVectorSet(-0.1f, 0.1f, -1.0f, 1.0f));
+
+		auto* pUB = (uint8_t*)mDevice->mapMemory(*mUniformMemory, mUniformMemoryOffsets[mFrameCount % 2], UniformBufferSize);
+		memcpy(pUB, &cbufBuf, sizeof cbufBuf);
+		memcpy(pUB + 2048, &cbufLight, sizeof cbufLight);
 		mDevice->unmapMemory(*mUniformMemory);
 
 		// Start drawing
@@ -798,8 +1198,39 @@ float4 main() : SV_Target {
 		cmdBuf.reset();
 		cmdBuf.begin(vk::CommandBufferBeginInfo(vk::CommandBufferUsageFlagBits::eOneTimeSubmit));
 
+		// Acquire exclusive ownership
+		if (mFrameCount == 1 && mQueueFamilyDmaIdx != mQueueFamilyGfxIdx)
+		{
+			const auto barriers = {
+				vk::ImageMemoryBarrier(
+					{}/*ignored*/, vk::AccessFlagBits::eShaderRead,
+					vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eShaderReadOnlyOptimal,
+					mQueueFamilyDmaIdx, mQueueFamilyGfxIdx, *mSailboatImg,
+					vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, mSailboatMipLevels, 0, 1)
+				),
+				vk::ImageMemoryBarrier(
+					{}/*ignored*/, vk::AccessFlagBits::eShaderRead,
+					vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eShaderReadOnlyOptimal,
+					mQueueFamilyDmaIdx, mQueueFamilyGfxIdx, *mLennaImg,
+					vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, mLennaMipLevels, 0, 1)
+				),
+			};
+			cmdBuf.pipelineBarrier(
+				vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eFragmentShader, {},
+				{}, {}, barriers);
+		}
+
+		auto srgbToLinear = [](std::array<float, 4> srgb) {
+			auto srgbToLinearUnit = [](float c) {
+				return (c <= 0.04045f) ? (c / 12.92f) : std::powf((c + 0.055f) / 1.055f, 2.4f);
+			};
+			return std::array<float, 4>({
+				srgbToLinearUnit(srgb[0]), srgbToLinearUnit(srgb[1]), srgbToLinearUnit(srgb[2]), srgb[3]
+			});
+		};
+
 		const std::array<vk::ClearValue, 2> sceneClearValue = {
-			vk::ClearColorValue(std::array<float, 4>({0.1f,0.2f,0.4f,1.0f})),
+			vk::ClearColorValue(srgbToLinear({0.1f,0.2f,0.4f,1.0f})),
 			vk::ClearDepthStencilValue(0.0f)
 		};
 		const auto renderPassInfo = vk::RenderPassBeginInfo(
@@ -810,47 +1241,81 @@ float4 main() : SV_Target {
 		cmdBuf.beginRenderPass(renderPassInfo, vk::SubpassContents::eInline);
 
 		// Draw a sphere
-		if (!(mSphereDescSet[mFrameCount % 2]))
+		if (!(mSphereDescSetBuf[mFrameCount % 2]))
 		{
+			const auto descSetLayouts = { *mDescriptorSetLayoutBuf, *mDescriptorSetLayoutTex };
 			auto descSets = mDevice->allocateDescriptorSets(vk::DescriptorSetAllocateInfo(
-				*mDescPools[mFrameCount % 2], *mDescriptorSetLayout
+				*mDescPools[mFrameCount % 2], descSetLayouts
 			));
-			mSphereDescSet[mFrameCount % 2] = descSets[0];
+			mSphereDescSetBuf[mFrameCount % 2] = descSets[0];
+			mSphereDescSetTex[mFrameCount % 2] = descSets[1];
 		}
 		vk::WriteDescriptorSet wdescSets[10];
 		auto descBufInfo = vk::DescriptorBufferInfo(*mUniformBuffers[mFrameCount % 2], 0, 2048);
+		auto descLightBufInfo = vk::DescriptorBufferInfo(*mUniformBuffers[mFrameCount % 2], 2048, 2048);
+		auto descTexInfo = vk::DescriptorImageInfo({}, *mSailboatView, vk::ImageLayout::eShaderReadOnlyOptimal);
+		auto descSamplerInfo = vk::DescriptorImageInfo(*mSampler, {}, {});
 		wdescSets[0] = vk::WriteDescriptorSet(
-			mSphereDescSet[mFrameCount % 2], 0, 0, 1, vk::DescriptorType::eUniformBuffer
+			mSphereDescSetBuf[mFrameCount % 2], 0, 0, 1, vk::DescriptorType::eUniformBuffer
 			).setBufferInfo(descBufInfo);
-		mDevice->updateDescriptorSets(1, wdescSets, 0, nullptr);
+		wdescSets[1] = vk::WriteDescriptorSet(
+			mSphereDescSetTex[mFrameCount % 2], 0, 0, 1, vk::DescriptorType::eSampledImage
+		).setImageInfo(descTexInfo);
+		wdescSets[2] = vk::WriteDescriptorSet(
+			mSphereDescSetTex[mFrameCount % 2], 1, 0, 1, vk::DescriptorType::eSampler
+		).setImageInfo(descSamplerInfo);
+		wdescSets[3] = vk::WriteDescriptorSet(
+			mSphereDescSetBuf[mFrameCount % 2], 10, 0, 1, vk::DescriptorType::eUniformBuffer
+		).setBufferInfo(descLightBufInfo);
+		mDevice->updateDescriptorSets(4, wdescSets, 0, nullptr);
 		cmdBuf.setViewport(0, vk::Viewport(0, 0, (float)mSceneExtent.width, (float)mSceneExtent.height, 0, 1));
 		vk::Rect2D scissor({}, mSceneExtent);
 		cmdBuf.setScissor(0, scissor);
 		cmdBuf.bindPipeline(vk::PipelineBindPoint::eGraphics, *mPSO);
 		cmdBuf.bindVertexBuffers(0, *mSphereVB, { 0 });
 		cmdBuf.bindIndexBuffer(*mSphereIB, 0, vk::IndexType::eUint16);
+		const auto sphereDescSets = {
+			mSphereDescSetBuf[mFrameCount % 2], mSphereDescSetTex[mFrameCount % 2]
+		};
 		cmdBuf.bindDescriptorSets(
-			vk::PipelineBindPoint::eGraphics, *mPipelineLayout, 0, mSphereDescSet[mFrameCount % 2], {}
+			vk::PipelineBindPoint::eGraphics, *mPipelineLayout, 0, sphereDescSets, {}
 		);
-		cmdBuf.drawIndexed(6 * SphereStacks * SphereSlices, 1, 0, 0, 0);
+		cmdBuf.drawIndexed(6 * SphereStacks * SphereSlices, 12, 0, 0, 1);
 
 		// Draw a plane
-		if (!(mPlaneDescSet[mFrameCount % 2]))
+		if (!(mPlaneDescSetBuf[mFrameCount % 2]))
 		{
+			const auto descSetLayouts = { *mDescriptorSetLayoutBuf, *mDescriptorSetLayoutTex };
 			auto descSets = mDevice->allocateDescriptorSets(vk::DescriptorSetAllocateInfo(
-				*mDescPools[mFrameCount % 2], *mDescriptorSetLayout
+				*mDescPools[mFrameCount % 2], descSetLayouts
 			));
-			mPlaneDescSet[mFrameCount % 2] = descSets[0];
+			mPlaneDescSetBuf[mFrameCount % 2] = descSets[0];
+			mPlaneDescSetTex[mFrameCount % 2] = descSets[1];
 		}
 		descBufInfo = vk::DescriptorBufferInfo(*mUniformBuffers[mFrameCount % 2], 0, 2048);
+		descLightBufInfo = vk::DescriptorBufferInfo(*mUniformBuffers[mFrameCount % 2], 2048, 2048);
+		descTexInfo = vk::DescriptorImageInfo({}, *mLennaView, vk::ImageLayout::eShaderReadOnlyOptimal);
+		descSamplerInfo = vk::DescriptorImageInfo(*mSampler, {}, {});
 		wdescSets[0] = vk::WriteDescriptorSet(
-			mPlaneDescSet[mFrameCount % 2], 0, 0, 1, vk::DescriptorType::eUniformBuffer
+			mPlaneDescSetBuf[mFrameCount % 2], 0, 0, 1, vk::DescriptorType::eUniformBuffer
 		).setBufferInfo(descBufInfo);
-		mDevice->updateDescriptorSets(1, wdescSets, 0, nullptr);
+		wdescSets[1] = vk::WriteDescriptorSet(
+			mPlaneDescSetTex[mFrameCount % 2], 0, 0, 1, vk::DescriptorType::eSampledImage
+		).setImageInfo(descTexInfo);
+		wdescSets[2] = vk::WriteDescriptorSet(
+			mPlaneDescSetTex[mFrameCount % 2], 1, 0, 1, vk::DescriptorType::eSampler
+		).setImageInfo(descSamplerInfo);
+		wdescSets[3] = vk::WriteDescriptorSet(
+			mPlaneDescSetBuf[mFrameCount % 2], 10, 0, 1, vk::DescriptorType::eUniformBuffer
+		).setBufferInfo(descLightBufInfo);
+		mDevice->updateDescriptorSets(4, wdescSets, 0, nullptr);
 		cmdBuf.bindVertexBuffers(0, *mPlaneVB, { 0 });
 		cmdBuf.bindIndexBuffer(*mPlaneIB, 0, vk::IndexType::eUint16);
+		const auto planeDescSets = {
+			mPlaneDescSetBuf[mFrameCount % 2], mPlaneDescSetTex[mFrameCount % 2]
+		};
 		cmdBuf.bindDescriptorSets(
-			vk::PipelineBindPoint::eGraphics, *mPipelineLayout, 0, mPlaneDescSet[mFrameCount % 2], {}
+			vk::PipelineBindPoint::eGraphics, *mPipelineLayout, 0, planeDescSets, {}
 		);
 		cmdBuf.drawIndexed(6, 1, 0, 0, 0);
 
@@ -891,9 +1356,48 @@ float4 main() : SV_Target {
 		const auto r = mQueuePresent.presentKHR(presentInfo);
 	}
 
+	void MoveUp()
+	{
+		auto d = DirectX::XMMatrixRotationX(DirectX::XMConvertToRadians(-3.f));
+		auto p = DirectX::XMVector3TransformCoord(DirectX::XMVectorSubtract(mCameraTarget, mCameraPos), d);
+		mCameraTarget = DirectX::XMVectorAdd(p, mCameraPos);
+		mCameraUp = DirectX::XMVector3TransformCoord(mCameraUp, d);
+	}
+	void MoveDown()
+	{
+		auto d = DirectX::XMMatrixRotationX(DirectX::XMConvertToRadians(3.f));
+		auto p = DirectX::XMVector3TransformCoord(DirectX::XMVectorSubtract(mCameraTarget, mCameraPos), d);
+		mCameraTarget = DirectX::XMVectorAdd(p, mCameraPos);
+		mCameraUp = DirectX::XMVector3TransformCoord(mCameraUp, d);
+	}
+	void MoveFwd()
+	{
+		auto d = DirectX::XMVectorScale(DirectX::XMVectorSubtract(mCameraPos, mCameraTarget), -0.08f);
+		mCameraPos = DirectX::XMVectorAdd(d, mCameraPos);
+		mCameraTarget = DirectX::XMVectorAdd(d, mCameraTarget);
+	}
+	void MoveBack()
+	{
+		auto d = DirectX::XMVectorScale(DirectX::XMVectorSubtract(mCameraPos, mCameraTarget), 0.08f);
+		mCameraPos = DirectX::XMVectorAdd(d, mCameraPos);
+		mCameraTarget = DirectX::XMVectorAdd(d, mCameraTarget);
+	}
+	void MoveRight()
+	{
+		auto d = DirectX::XMMatrixRotationY(DirectX::XMConvertToRadians(-3.f));
+		auto p = DirectX::XMVector3TransformCoord(DirectX::XMVectorSubtract(mCameraTarget, mCameraPos), d);
+		mCameraTarget = DirectX::XMVectorAdd(p, mCameraPos);
+	}
+	void MoveLeft()
+	{
+		auto d = DirectX::XMMatrixRotationY(DirectX::XMConvertToRadians(3.f));
+		auto p = DirectX::XMVector3TransformCoord(DirectX::XMVectorSubtract(mCameraTarget, mCameraPos), d);
+		mCameraTarget = DirectX::XMVectorAdd(p, mCameraPos);
+	}
+
 private:
-	DirectX::XMVECTOR mCameraPos = DirectX::XMVectorSet(0.0f, 4.0f, -4.0f, 0);
-	DirectX::XMVECTOR mCameraTarget = DirectX::XMVectorSet(0, 0, 0, 0);
+	DirectX::XMVECTOR mCameraPos = DirectX::XMVectorSet(0.0f, 2.5f, -5.0f, 0);
+	DirectX::XMVECTOR mCameraTarget = DirectX::XMVectorSet(0.0f, 1.0f, 0.0f, 0);
 	DirectX::XMVECTOR mCameraUp = DirectX::XMVectorSet(0, 1, 0, 0);
 };
 
@@ -973,6 +1477,15 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
 			}
 			else {
 				DispatchMessage(&msg);
+				if (msg.message == WM_KEYDOWN)
+				{
+					if (msg.wParam == 'E') vlk.MoveUp();
+					else if (msg.wParam == 'Q') vlk.MoveDown();
+					else if (msg.wParam == 'W') vlk.MoveFwd();
+					else if (msg.wParam == 'S') vlk.MoveBack();
+					else if (msg.wParam == 'D') vlk.MoveRight();
+					else if (msg.wParam == 'A') vlk.MoveLeft();
+				}
 			}
 		}
 	}
