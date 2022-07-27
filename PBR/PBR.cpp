@@ -549,17 +549,21 @@ float V_SmithGGXCorrelated(float NoV, float NoL, float roughness) {
 	float GGXL = NoV * sqrt(NoL * NoL * (1.0 - a2) + a2);
 	return 0.5 / (GGXV + GGXL);
 }
-float F_Schlick(float u, float f0, float f90 = 1.0) {
+float3 F_Schlick(float u, float3 f0, float f90 = 1.0) {
 	return f0 + (1.0 - f0) * pow(1.0 - u, 5.0);
 }
 float Fd_Burley(float NoV, float NoL, float LoH, float roughness) {
 	float f90 = 0.5 + 2.0 * roughness * LoH * LoH;
-	float lightScatter = F_Schlick(NoL, 1.0, f90);
-	float viewScatter = F_Schlick(NoV, 1.0, f90);
+	float lightScatter = F_Schlick(NoL, 1.0, f90).x;
+	float viewScatter = F_Schlick(NoV, 1.0, f90).x;
 	return lightScatter * viewScatter * (1.0 / PI);
 }
 float4 main(Input input) : SV_Target {
+	float4 baseColor = Tex.Sample(SS, input.texcoord);
+	float3 diffColor = (input.metallic > 0.0) ? 0.0 : baseColor.rgb;
+	float3 specColor = (input.metallic > 0.0) ? baseColor.rgb : F0.xxx;
 	input.normal = normalize(input.normal);
+
 	float3 viewDir = normalize(CameraPosition - input.world);
 	float3 halfVector = normalize(viewDir + SunLightDirection);
 	float dotNV = abs(dot(input.normal, viewDir)) + 1e-5;
@@ -569,13 +573,12 @@ float4 main(Input input) : SV_Target {
 	float roughness = input.roughness * input.roughness;
 	float termD = D_GGX(dotNH, roughness);
 	float termV = V_SmithGGXCorrelated(dotNV, dotNL, roughness);
-	float termF = F_Schlick(F0, dotLH);
+	float3 termF = F_Schlick(dotLH, specColor);
 	float3 Fr = termD * termV * termF;
-	float3 Fd = Fd_Burley(dotNV, dotNL, dotLH, roughness);
-	float3 F = (input.metallic > 0.0) ? Fr : Fd;
+	float Fd = Fd_Burley(dotNV, dotNL, dotLH, roughness);
 
-	float4 color = Tex.Sample(SS, input.texcoord);
-	float3 lit = SunLightIntensity * F * color.rgb * dotNL;
+	float3 F = Fr + Fd * diffColor;
+	float3 lit = SunLightIntensity * F * dotNL;
 	return float4(lit, 1.0);
 }
 )#";
