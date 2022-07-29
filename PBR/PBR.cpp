@@ -90,10 +90,13 @@ class VLK
 	vk::UniqueDescriptorSetLayout mDescriptorSetLayoutBuf;
 	vk::UniqueDescriptorSetLayout mDescriptorSetLayoutTex;
 	vk::UniqueDescriptorSetLayout mDescriptorSetLayoutPost;
+	vk::UniqueDescriptorSetLayout mDescriptorSetLayoutABRDF;
 	vk::UniquePipelineLayout mPipelineLayout;
 	vk::UniquePipelineLayout mPipelineLayoutPost;
+	vk::UniquePipelineLayout mPipelineLayoutABRDF;
 	vk::UniquePipeline mPSO;
 	vk::UniquePipeline mPSOPost;
+	vk::UniquePipeline mPSOABRDF;
 
 	vk::Extent2D mSceneExtent;
 	vk::UniqueImage mSceneColor;
@@ -139,7 +142,12 @@ class VLK
 	uint32_t mLennaMipLevels;
 	vk::UniqueDeviceMemory mImagesMemory;
 
+	vk::UniqueImage mAmbientBrdfImg;
+	vk::UniqueImageView mAmbientBrdfView;
+	vk::UniqueDeviceMemory mAmbientBrdfMemory;
+
 	vk::UniqueSampler mSampler;
+	vk::UniqueSampler mAmbientBrdfSampler;
 
 	vk::DescriptorSet mSphereDescSetBuf[2];
 	vk::DescriptorSet mSphereDescSetTex[2];
@@ -379,6 +387,7 @@ public:
 			vk::DescriptorPoolSize(vk::DescriptorType::eUniformBuffer, 100),
 			vk::DescriptorPoolSize(vk::DescriptorType::eSampledImage, 100),
 			vk::DescriptorPoolSize(vk::DescriptorType::eSampler, 10),
+			vk::DescriptorPoolSize(vk::DescriptorType::eStorageImage, 10),
 		};
 		for (auto& p : mDescPools)
 		{
@@ -465,6 +474,12 @@ public:
 				vk::DescriptorSetLayoutBinding(
 					1, vk::DescriptorType::eSampler, 1, vk::ShaderStageFlagBits::eFragment
 				),
+				vk::DescriptorSetLayoutBinding(
+					2, vk::DescriptorType::eSampledImage, 1, vk::ShaderStageFlagBits::eFragment
+				),
+				vk::DescriptorSetLayoutBinding(
+					3, vk::DescriptorType::eSampler, 1, vk::ShaderStageFlagBits::eFragment
+				),
 			};
 			const auto descriptorSetLayoutInfo = vk::DescriptorSetLayoutCreateInfo(
 				{}, descriptorBinding
@@ -480,6 +495,14 @@ public:
 		);
 		mDescriptorSetLayoutPost = mDevice->createDescriptorSetLayoutUnique(descriptorSetLayoutInfoPost);
 
+		const auto descriptorBindingABRDF = vk::DescriptorSetLayoutBinding(
+			0, vk::DescriptorType::eStorageImage, 1, vk::ShaderStageFlagBits::eCompute
+		);
+		const auto descriptorSetLayoutInfoABRDF = vk::DescriptorSetLayoutCreateInfo(
+			{}, descriptorBindingABRDF
+		);
+		mDescriptorSetLayoutABRDF = mDevice->createDescriptorSetLayoutUnique(descriptorSetLayoutInfoABRDF);
+
 		// Create pipeline layouts
 		const auto pipelineDescSets = { *mDescriptorSetLayoutBuf, *mDescriptorSetLayoutTex };
 		mPipelineLayout = mDevice->createPipelineLayoutUnique(
@@ -487,6 +510,9 @@ public:
 		);
 		mPipelineLayoutPost = mDevice->createPipelineLayoutUnique(
 			vk::PipelineLayoutCreateInfo({}, *mDescriptorSetLayoutPost)
+		);
+		mPipelineLayoutABRDF = mDevice->createPipelineLayoutUnique(
+			vk::PipelineLayoutCreateInfo({}, *mDescriptorSetLayoutABRDF)
 		);
 
 		// Create modules
@@ -527,6 +553,8 @@ Output main(uint instanceID : SV_InstanceID, [[vk::builtin("BaseInstance")]] uin
 };
 [[vk::binding(0, 1)]] Texture2D Tex;
 [[vk::binding(1, 1)]] SamplerState SS;
+[[vk::binding(2, 1)]] Texture2D AmbientBrdf;
+[[vk::binding(3, 1)]] SamplerState AmbientBrdfSS;
 struct Input {
 	float4 position : SV_Position;
 	float3 world : WorldPosition;
@@ -579,6 +607,7 @@ float4 main(Input input) : SV_Target {
 
 	float3 F = Fr + Fd * diffColor;
 	float3 lit = SunLightIntensity * F * dotNL;
+lit+=AmbientBrdf.Sample(AmbientBrdfSS,float2(0,0)).xyy;
 	return float4(lit, 1.0);
 }
 )#";
@@ -614,6 +643,71 @@ float4 main() : SV_Target {
 	return float4(color, 1);
 }
 )#";
+		
+		static const char shaderCodeABRDFCS[] = R"#(
+#define PI (3.14159265f)
+static const uint sampleCount = 1024;
+float3 importanceSampleGGX(float2 Xi, float Roughness, float3 N)
+{
+	float a = Roughness * Roughness;
+	float Phi = 2 * PI * Xi.x;
+	float CosTheta = sqrt( (1 - Xi.y) / ( 1 + (a*a - 1) * Xi.y ) );
+	float SinTheta = sqrt( 1 - CosTheta * CosTheta );
+	float3 H;
+	H.x = SinTheta * cos( Phi );
+	H.y = SinTheta * sin( Phi );
+	H.z = CosTheta;
+	float3 UpVector = abs(N.z) < 0.999 ? float3(0,0,1) : float3(1,0,0);
+	float3 TangentX = normalize( cross( UpVector, N ) );
+	float3 TangentY = cross( N, TangentX );
+	// Tangent to world space
+	return TangentX * H.x + TangentY * H.y + N * H.z;
+}
+float2 hammersley(uint i, float numSamples) {
+	return float2(i / numSamples, reversebits(i) / 4294967296.0);
+}
+float GDFG(float NoV, float NoL, float a) {
+	float a2 = a * a;
+	float GGXL = NoV * sqrt((-NoL * a2 + NoL) * NoL + a2);
+	float GGXV = NoL * sqrt((-NoV * a2 + NoV) * NoV + a2);
+	return (2 * NoL) / (GGXV + GGXL);
+}
+static const float3 N = float3(0, 0, 1);
+float2 DFG(float NoV, float a) {
+	float3 V;
+	V.x = sqrt(1.0f - NoV*NoV);
+	V.y = 0.0f;
+	V.z = NoV;
+
+	float2 r = 0.0f;
+	for (uint i = 0; i < sampleCount; i++) {
+		float2 Xi = hammersley(i, sampleCount);
+		float3 H = importanceSampleGGX(Xi, a, N);
+		float3 L = 2.0f * dot(V, H) * H - V;
+
+		float VoH = saturate(dot(V, H));
+		float NoL = saturate(L.z);
+		float NoH = saturate(H.z);
+
+		if (NoL > 0.0f) {
+			float G = GDFG(NoV, NoL, a);
+			float Gv = G * VoH / NoH;
+			float Fc = pow(1 - VoH, 5.0f);
+			r.x += Gv * (1 - Fc);
+			r.y += Gv * Fc;
+		}
+	}
+	return r * (1.0f / sampleCount);
+}
+RWTexture2D<float2> Output;
+[numthreads(8, 8, 1)]
+void main(uint2 dtid : SV_DispatchThreadID) {
+	float percepturalRoughness = (0.5 + dtid.x) / 256;
+	float roughness = percepturalRoughness * percepturalRoughness;
+	float dotNV = (0.5 + dtid.y) / 256;
+	Output[dtid] = DFG(roughness, dotNV);
+}
+)#";
 
 		SetDllDirectory(L"../dll/");
 
@@ -622,13 +716,14 @@ float4 main() : SV_Target {
 		ComPtr<IDxcLibrary> dxcLib;
 		CHK(DxcCreateInstance(CLSID_DxcLibrary, IID_PPV_ARGS(&dxcLib)));
 
-		ComPtr<IDxcBlobEncoding> dxcTxtSceneVS, dxcTxtScenePS, dxcTxtPostVS, dxcTxtPostPS;
+		ComPtr<IDxcBlobEncoding> dxcTxtSceneVS, dxcTxtScenePS, dxcTxtPostVS, dxcTxtPostPS, dxcTxtABRDFCS;
 		CHK(dxcLib->CreateBlobWithEncodingFromPinned(shaderCodeSceneVS, _countof(shaderCodeSceneVS) - 1, CP_UTF8, &dxcTxtSceneVS));
 		CHK(dxcLib->CreateBlobWithEncodingFromPinned(shaderCodeScenePS, _countof(shaderCodeScenePS) - 1, CP_UTF8, &dxcTxtScenePS));
 		CHK(dxcLib->CreateBlobWithEncodingFromPinned(shaderCodePostVS, _countof(shaderCodePostVS) - 1, CP_UTF8, &dxcTxtPostVS));
 		CHK(dxcLib->CreateBlobWithEncodingFromPinned(shaderCodePostPS, _countof(shaderCodePostPS) - 1, CP_UTF8, &dxcTxtPostPS));
+		CHK(dxcLib->CreateBlobWithEncodingFromPinned(shaderCodeABRDFCS, _countof(shaderCodeABRDFCS) - 1, CP_UTF8, &dxcTxtABRDFCS));
 
-		ComPtr<IDxcBlob> dxcBlobSceneVS, dxcBlobScenePS, dxcBlobPostVS, dxcBlobPostPS;
+		ComPtr<IDxcBlob> dxcBlobSceneVS, dxcBlobScenePS, dxcBlobPostVS, dxcBlobPostPS, dxcBlobABRDFCS;
 		ComPtr<IDxcBlobEncoding> dxcError;
 		ComPtr<IDxcOperationResult> dxcRes;
 		const wchar_t* shaderArgsVS[] = {
@@ -636,6 +731,9 @@ float4 main() : SV_Target {
 		};
 		const wchar_t* shaderArgsPS[] = {
 			L"-Zi", L"-all_resources_bound", L"-Qembed_debug", L"-spirv", L"-fvk-use-dx-position-w"
+		};
+		const wchar_t* shaderArgsCS[] = {
+			L"-Zi", L"-all_resources_bound", L"-Qembed_debug", L"-spirv"
 		};
 
 		dxc->Compile(dxcTxtSceneVS.Get(), nullptr, L"main", L"vs_6_0", shaderArgsVS, _countof(shaderArgsVS), nullptr, 0, nullptr, &dxcRes);
@@ -666,6 +764,13 @@ float4 main() : SV_Target {
 			throw runtime_error("Shader compile error.");
 		}
 		dxcRes->GetResult(&dxcBlobPostPS);
+		dxc->Compile(dxcTxtABRDFCS.Get(), nullptr, L"main", L"cs_6_0", shaderArgsCS, _countof(shaderArgsCS), nullptr, 0, nullptr, &dxcRes);
+		dxcRes->GetErrorBuffer(&dxcError);
+		if (dxcError->GetBufferSize()) {
+			OutputDebugStringA(reinterpret_cast<char*>(dxcError->GetBufferPointer()));
+			throw runtime_error("Shader compile error.");
+		}
+		dxcRes->GetResult(&dxcBlobABRDFCS);
 
 		const auto vsCreateInfo = vk::ShaderModuleCreateInfo(
 			{}, dxcBlobSceneVS->GetBufferSize(), reinterpret_cast<uint32_t*>(dxcBlobSceneVS->GetBufferPointer()));
@@ -679,6 +784,9 @@ float4 main() : SV_Target {
 		const auto psPostCreateInfo = vk::ShaderModuleCreateInfo(
 			{}, dxcBlobPostPS->GetBufferSize(), reinterpret_cast<uint32_t*>(dxcBlobPostPS->GetBufferPointer()));
 		auto fsPostModule = mDevice->createShaderModuleUnique(psPostCreateInfo);
+		const auto csABRDFCreateInfo = vk::ShaderModuleCreateInfo(
+			{}, dxcBlobABRDFCS->GetBufferSize(), reinterpret_cast<uint32_t*>(dxcBlobABRDFCS->GetBufferPointer()));
+		auto csABRDFModule = mDevice->createShaderModuleUnique(csABRDFCreateInfo);
 
 		// Create PSOs
 		const auto pipelineShadersInfo = {
@@ -741,6 +849,12 @@ float4 main() : SV_Target {
 		vkres = mDevice->createGraphicsPipelineUnique(nullptr, pipelinePostInfo);
 		CHK(vkres.result);
 		mPSOPost = std::move(vkres.value);
+
+		const auto abrdfPipelineShadersInfo = vk::PipelineShaderStageCreateInfo({}, vk::ShaderStageFlagBits::eCompute, *csABRDFModule, "main");
+		const auto abrdfPipelineInfo = vk::ComputePipelineCreateInfo({}, abrdfPipelineShadersInfo, *mPipelineLayoutABRDF);
+		vkres = mDevice->createComputePipelineUnique(nullptr, abrdfPipelineInfo);
+		CHK(vkres.result);
+		mPSOABRDF = std::move(vkres.value);
 
 		// Get memory props
 		const auto memoryProps = physDevice.getMemoryProperties();
@@ -950,6 +1064,30 @@ float4 main() : SV_Target {
 			{}, vk::Filter::eLinear, vk::Filter::eLinear, vk::SamplerMipmapMode::eLinear,
 			vk::SamplerAddressMode::eClampToEdge, vk::SamplerAddressMode::eClampToEdge, vk::SamplerAddressMode::eClampToEdge,
 			0.0f, VK_TRUE, 4.0f, VK_FALSE, {}, 0.0f, VK_LOD_CLAMP_NONE
+		));
+
+		// Create an ambient BRDF texture
+		mAmbientBrdfImg = mDevice->createImageUnique(vk::ImageCreateInfo(
+			{}, vk::ImageType::e2D, vk::Format::eR16G16Sfloat, vk::Extent3D(256, 256, 1),
+			1, 1, vk::SampleCountFlagBits::e1, vk::ImageTiling::eOptimal,
+			vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled,
+			vk::SharingMode::eExclusive, {}, vk::ImageLayout::eUndefined
+		));
+		const auto ambinetBrdfMemReq = mDevice->getImageMemoryRequirements(*mAmbientBrdfImg);
+		mAmbientBrdfMemory = mDevice->allocateMemoryUnique(vk::MemoryAllocateInfo(
+			ambinetBrdfMemReq.size, GetMemTypeIndex(ambinetBrdfMemReq, false)
+		));
+		mDevice->bindImageMemory(*mAmbientBrdfImg, *mAmbientBrdfMemory, 0);
+		mAmbientBrdfView = mDevice->createImageViewUnique(vk::ImageViewCreateInfo(
+			{}, *mAmbientBrdfImg, vk::ImageViewType::e2D, vk::Format::eR16G16Sfloat)
+			.setSubresourceRange(
+				vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1))
+		);
+		// Create a sampler for ambient BRDF texture
+		mAmbientBrdfSampler = mDevice->createSamplerUnique(vk::SamplerCreateInfo(
+			{}, vk::Filter::eLinear, vk::Filter::eLinear, vk::SamplerMipmapMode::eLinear,
+			vk::SamplerAddressMode::eClampToEdge, vk::SamplerAddressMode::eClampToEdge, vk::SamplerAddressMode::eClampToEdge,
+			0.0f, VK_FALSE, 1.0f, VK_FALSE, {}, 0.0f, VK_LOD_CLAMP_NONE
 		));
 
 		// Load images and generate mipmaps
@@ -1223,6 +1361,42 @@ float4 main() : SV_Target {
 				{}, {}, barriers);
 		}
 
+		// Compute ambinet BRDF
+		if (mFrameCount == 1)
+		{
+			cmdBuf.pipelineBarrier(
+				vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eComputeShader, {},
+				{}, {}, vk::ImageMemoryBarrier(
+					{}/*ignored*/, vk::AccessFlagBits::eShaderWrite,
+					vk::ImageLayout::eUndefined, vk::ImageLayout::eGeneral,
+					mQueueFamilyGfxIdx, mQueueFamilyGfxIdx, * mAmbientBrdfImg,
+					vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1)
+				));
+
+			cmdBuf.bindPipeline(vk::PipelineBindPoint::eCompute, *mPSOABRDF);
+			auto descSets = mDevice->allocateDescriptorSets(vk::DescriptorSetAllocateInfo(
+				*mDescPools[mFrameCount % 2], *mDescriptorSetLayoutABRDF
+			));
+			auto abrdfImageInfo = vk::DescriptorImageInfo( {}, *mAmbientBrdfView, vk::ImageLayout::eGeneral);
+			auto wdesc = vk::WriteDescriptorSet(
+				descSets[0], 0, 0, 1, vk::DescriptorType::eStorageImage
+			).setImageInfo(abrdfImageInfo);
+			mDevice->updateDescriptorSets(wdesc, {});
+			cmdBuf.bindDescriptorSets(
+				vk::PipelineBindPoint::eCompute, *mPipelineLayoutABRDF, 0, descSets[0], {}
+			);
+			cmdBuf.dispatch(256 / 8, 256 / 8, 1);
+
+			cmdBuf.pipelineBarrier(
+				vk::PipelineStageFlagBits::eComputeShader, vk::PipelineStageFlagBits::eFragmentShader, {},
+				{}, {}, vk::ImageMemoryBarrier(
+					vk::AccessFlagBits::eShaderWrite, vk::AccessFlagBits::eShaderRead,
+					vk::ImageLayout::eGeneral, vk::ImageLayout::eShaderReadOnlyOptimal,
+					mQueueFamilyGfxIdx, mQueueFamilyGfxIdx, * mAmbientBrdfImg,
+					vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1)
+				));
+		}
+
 		auto srgbToLinear = [](std::array<float, 4> srgb) {
 			auto srgbToLinearUnit = [](float c) {
 				return (c <= 0.04045f) ? (c / 12.92f) : std::powf((c + 0.055f) / 1.055f, 2.4f);
@@ -1258,6 +1432,8 @@ float4 main() : SV_Target {
 		auto descLightBufInfo = vk::DescriptorBufferInfo(*mUniformBuffers[mFrameCount % 2], 2048, 2048);
 		auto descTexInfo = vk::DescriptorImageInfo({}, *mSailboatView, vk::ImageLayout::eShaderReadOnlyOptimal);
 		auto descSamplerInfo = vk::DescriptorImageInfo(*mSampler, {}, {});
+		const auto descABRDFInfo = vk::DescriptorImageInfo({}, *mAmbientBrdfView, vk::ImageLayout::eShaderReadOnlyOptimal);
+		const auto descABRDFSamplerInfo = vk::DescriptorImageInfo(*mAmbientBrdfSampler, {}, {});
 		wdescSets[0] = vk::WriteDescriptorSet(
 			mSphereDescSetBuf[mFrameCount % 2], 0, 0, 1, vk::DescriptorType::eUniformBuffer
 			).setBufferInfo(descBufInfo);
@@ -1268,9 +1444,15 @@ float4 main() : SV_Target {
 			mSphereDescSetTex[mFrameCount % 2], 1, 0, 1, vk::DescriptorType::eSampler
 		).setImageInfo(descSamplerInfo);
 		wdescSets[3] = vk::WriteDescriptorSet(
+			mSphereDescSetTex[mFrameCount % 2], 2, 0, 1, vk::DescriptorType::eSampledImage
+		).setImageInfo(descABRDFInfo);
+		wdescSets[4] = vk::WriteDescriptorSet(
+			mSphereDescSetTex[mFrameCount % 2], 3, 0, 1, vk::DescriptorType::eSampler
+		).setImageInfo(descABRDFSamplerInfo);
+		wdescSets[5] = vk::WriteDescriptorSet(
 			mSphereDescSetBuf[mFrameCount % 2], 10, 0, 1, vk::DescriptorType::eUniformBuffer
 		).setBufferInfo(descLightBufInfo);
-		mDevice->updateDescriptorSets(4, wdescSets, 0, nullptr);
+		mDevice->updateDescriptorSets(6, wdescSets, 0, nullptr);
 		cmdBuf.setViewport(0, vk::Viewport(0, 0, (float)mSceneExtent.width, (float)mSceneExtent.height, 0, 1));
 		vk::Rect2D scissor({}, mSceneExtent);
 		cmdBuf.setScissor(0, scissor);
@@ -1309,9 +1491,15 @@ float4 main() : SV_Target {
 			mPlaneDescSetTex[mFrameCount % 2], 1, 0, 1, vk::DescriptorType::eSampler
 		).setImageInfo(descSamplerInfo);
 		wdescSets[3] = vk::WriteDescriptorSet(
+			mPlaneDescSetTex[mFrameCount % 2], 2, 0, 1, vk::DescriptorType::eSampledImage
+		).setImageInfo(descABRDFInfo);
+		wdescSets[4] = vk::WriteDescriptorSet(
+			mPlaneDescSetTex[mFrameCount % 2], 3, 0, 1, vk::DescriptorType::eSampler
+		).setImageInfo(descABRDFSamplerInfo);
+		wdescSets[5] = vk::WriteDescriptorSet(
 			mPlaneDescSetBuf[mFrameCount % 2], 10, 0, 1, vk::DescriptorType::eUniformBuffer
 		).setBufferInfo(descLightBufInfo);
-		mDevice->updateDescriptorSets(4, wdescSets, 0, nullptr);
+		mDevice->updateDescriptorSets(6, wdescSets, 0, nullptr);
 		cmdBuf.bindVertexBuffers(0, *mPlaneVB, { 0 });
 		cmdBuf.bindIndexBuffer(*mPlaneIB, 0, vk::IndexType::eUint16);
 		const auto planeDescSets = {
