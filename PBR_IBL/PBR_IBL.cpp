@@ -590,9 +590,9 @@ static const float MaxEnvMapMipLevel = 7.0;
 };
 [[vk::binding(0, 1)]] Texture2D BaseColor;
 [[vk::binding(1, 1)]] SamplerState SS;
-[[vk::binding(2, 1)]] TextureCube EnvMap;
+[[vk::binding(2, 1)]] TextureCube<float3> EnvMap;
 [[vk::binding(3, 1)]] SamplerState EnvMapSS;
-[[vk::binding(4, 1)]] Texture2D AmbientBrdf;
+[[vk::binding(4, 1)]] Texture2D<float2> AmbientBrdf;
 [[vk::binding(5, 1)]] SamplerState AmbientBrdfSS;
 struct Input {
 	float4 position : SV_Position;
@@ -603,6 +603,7 @@ struct Input {
 	float roughness : Roughness;
 };
 // https://google.github.io/filament/Filament.html
+// https://cdn2.unrealengine.com/Resources/files/2013SiggraphPresentationsNotes-26915738.pdf
 #define PI (3.14159265f)
 #define F0 (0.04f)
 float D_GGX(float NoH, float a) {
@@ -625,8 +626,19 @@ float Fd_Burley(float NoV, float NoL, float LoH, float roughness) {
 	float viewScatter = F_Schlick(NoV, 1.0, f90).x;
 	return lightScatter * viewScatter * (1.0 / PI);
 }
+float computeLODFromRoughness(float perceptualRoughness) {
+	return (perceptualRoughness * MaxEnvMapMipLevel);
+}
+float3 ApproximateSpecularIBL(float3 SpecularColor, float Roughness, float3 N, float3 V) {
+	float NoV = saturate(dot(N, V));
+	float3 R = 2 * dot(V, N) * N - V;
+	float lod = computeLODFromRoughness(Roughness);
+	float3 PrefilteredColor = EnvMap.SampleLevel(EnvMapSS, R, lod);
+	float2 EnvBRDF = AmbientBrdf.Sample(AmbientBrdfSS, float2(NoV, Roughness * Roughness), 0);
+	return PrefilteredColor * (SpecularColor * EnvBRDF.x + EnvBRDF.y);
+}
 float4 main(Input input) : SV_Target {
-	float4 baseColor = BaseColor.Sample(SS, input.texcoord);
+	float4 baseColor = 1; //BaseColor.Sample(SS, input.texcoord);
 	float3 diffColor = (input.metallic > 0.0) ? 0.0 : baseColor.rgb;
 	float3 specColor = (input.metallic > 0.0) ? baseColor.rgb : F0.xxx;
 	input.normal = normalize(input.normal);
@@ -645,9 +657,8 @@ float4 main(Input input) : SV_Target {
 	float Fd = Fd_Burley(dotNV, dotNL, dotLH, roughness);
 
 	float3 F = Fr + Fd * diffColor;
-	float3 lit = SunLightIntensity * F * dotNL;
-lit+=AmbientBrdf.Sample(AmbientBrdfSS,float2(0,0)).xyy * 0.01;
-lit+=EnvMap.SampleLevel(EnvMapSS,-viewDir,roughness * MaxEnvMapMipLevel).xyz * 0.3;
+	float3 lit = 0; //SunLightIntensity * F * dotNL;
+	lit += ApproximateSpecularIBL(specColor, input.roughness, input.normal, viewDir);
 	return float4(lit, 1.0);
 }
 )#";
@@ -751,7 +762,8 @@ void main(uint2 dtid : SV_DispatchThreadID) {
 
 		static const char shaderCodeEnvFilterCS[] = R"#(
 #define PI (3.14159265f)
-static const uint sampleCount = 1024;
+static const uint sampleCount = 4096;
+static const float clampLuminance = 500;
 float3 importanceSampleGGX(float2 Xi, float Roughness, float3 N)
 {
 	float a = Roughness * Roughness;
@@ -796,7 +808,7 @@ float3 PrefilterEnvMap(float Roughness, float3 R) {
 		float3 L = 2.0f * dot(V, H) * H - V;
 		float NoL = saturate(dot(N, L));
 		if (NoL > 0) {
-			PrefilteredColor += Input.SampleLevel(SS, L, 0).rgb * NoL;
+			PrefilteredColor += min(clampLuminance, Input.SampleLevel(SS, L, 0).rgb) * NoL;
 			TotalWeight += NoL;
 		}
 	}
@@ -1289,11 +1301,40 @@ void main(uint3 dtid : SV_DispatchThreadID) {
 		mSailboatMipLevels = (uint32_t)sailboatData.size();
 		mLennaMipLevels = (uint32_t)lennaData.size();
 
-		// Load environment maps
+		// Load IBL maps
+		auto loadHdrBinary = [&](const char* path)
+		{
+			const int w = 128;
+			const int h = 128;
+			ifstream ifs(path, ios::binary);
+			auto oneline = make_unique<float[]>(w * sizeof(float) * 4); // float4
+			auto data = make_unique<uint8_t[]>(w * h * sizeof(short) * 4); // half4
+			for (int y = 0; y < h; y++)
+			{
+				ifs.read(reinterpret_cast<char*>(oneline.get()), w * sizeof(float) * 4);
+				for (int x = 0; x < w; ++x)
+				{
+					auto s = reinterpret_cast<short*>(data.get() + (y * w + x) * sizeof(short) * 4);
+					short h[4];
+					_mm_storel_epi64((__m128i*)h, _mm_cvtps_ph(_mm_loadu_ps(&oneline[4 * x]), 0));
+					s[0] = h[0];
+					s[1] = h[1];
+					s[2] = h[2];
+					s[3] = h[3];
+				}
+			}
+			return ImageData{
+				vk::Extent3D(w, h, 1),
+				uint32_t(w * h * sizeof(short) * 4),
+				move(data) };
+		};
 		array<ImageData, 6> envMapData = {
-			loadBitmap("../res/Yokohama/posx.bmp"), loadBitmap("../res/Yokohama/negx.bmp"),
-			loadBitmap("../res/Yokohama/posy.bmp"), loadBitmap("../res/Yokohama/negy.bmp"),
-			loadBitmap("../res/Yokohama/posz.bmp"), loadBitmap("../res/Yokohama/negz.bmp"),
+			loadHdrBinary("../res/syferfontein_1d_clear/posx.bin"),
+			loadHdrBinary("../res/syferfontein_1d_clear/negx.bin"),
+			loadHdrBinary("../res/syferfontein_1d_clear/posy.bin"),
+			loadHdrBinary("../res/syferfontein_1d_clear/negy.bin"),
+			loadHdrBinary("../res/syferfontein_1d_clear/posz.bin"),
+			loadHdrBinary("../res/syferfontein_1d_clear/negz.bin"),
 		};
 		ASSERT(envMapData[0].extent.width == 128 && envMapData[0].extent.height == 128, "Unsupported size");
 		mEnvMapMipLevels = 8; // log2(128)+1==8
@@ -1313,10 +1354,9 @@ void main(uint3 dtid : SV_DispatchThreadID) {
 			vk::SharingMode::eExclusive, {}, vk::ImageLayout::eUndefined
 		));
 		const auto lennaMemReq = mDevice->getImageMemoryRequirements(*mLennaImg);
-		// TODO: Use HDR cubemap
 		mEnvMapImg = mDevice->createImageUnique(vk::ImageCreateInfo(
 			vk::ImageCreateFlagBits::eCubeCompatible,
-			vk::ImageType::e2D, vk::Format::eR8G8B8A8Unorm, envMapData[0].extent,
+			vk::ImageType::e2D, vk::Format::eR16G16B16A16Sfloat, envMapData[0].extent,
 			mEnvMapMipLevels, 6, vk::SampleCountFlagBits::e1, vk::ImageTiling::eOptimal,
 			vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eStorage,
 			vk::SharingMode::eExclusive, {}, vk::ImageLayout::eUndefined
@@ -1341,19 +1381,19 @@ void main(uint3 dtid : SV_DispatchThreadID) {
 			vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, mLennaMipLevels, 0, 1)
 		));
 		mEnvMapView = mDevice->createImageViewUnique(vk::ImageViewCreateInfo(
-			{}, *mEnvMapImg, vk::ImageViewType::eCube, vk::Format::eR8G8B8A8Unorm, {},
+			{}, *mEnvMapImg, vk::ImageViewType::eCube, vk::Format::eR16G16B16A16Sfloat, {},
 			vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, mEnvMapMipLevels, 0, 6)
 		));
 		mEnvMapMipView.resize(mEnvMapMipLevels);
 		mEnvMapMipCubeView.resize(mEnvMapMipLevels);
-		for (int i = 0; i < mEnvMapMipLevels; ++i)
+		for (int i = 0; i < (int)mEnvMapMipLevels; ++i)
 		{
 			mEnvMapMipView[i] = mDevice->createImageViewUnique(vk::ImageViewCreateInfo(
-				{}, *mEnvMapImg, vk::ImageViewType::e2DArray, vk::Format::eR8G8B8A8Unorm, {},
+				{}, *mEnvMapImg, vk::ImageViewType::e2DArray, vk::Format::eR16G16B16A16Sfloat, {},
 				vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, i, 1, 0, VK_REMAINING_ARRAY_LAYERS)
 			));
 			mEnvMapMipCubeView[i] = mDevice->createImageViewUnique(vk::ImageViewCreateInfo(
-				{}, *mEnvMapImg, vk::ImageViewType::eCube, vk::Format::eR8G8B8A8Unorm, {},
+				{}, *mEnvMapImg, vk::ImageViewType::eCube, vk::Format::eR16G16B16A16Sfloat, {},
 				vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, i, 1, 0, VK_REMAINING_ARRAY_LAYERS)
 			));
 		}
@@ -1596,7 +1636,7 @@ void main(uint3 dtid : SV_DispatchThreadID) {
 					vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1)
 				));
 
-			for (int i = 1; i < mEnvMapMipLevels; ++i)
+			for (int i = 1; i < (int)mEnvMapMipLevels; ++i)
 			{
 				cmdBuf.pipelineBarrier(
 					(i == 1) ? vk::PipelineStageFlagBits::eTopOfPipe : vk::PipelineStageFlagBits::eComputeShader,
