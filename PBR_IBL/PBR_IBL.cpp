@@ -92,14 +92,21 @@ class VLK
 	vk::UniqueDescriptorSetLayout mDescriptorSetLayoutPost;
 	vk::UniqueDescriptorSetLayout mDescriptorSetLayoutABRDF;
 	vk::UniqueDescriptorSetLayout mDescriptorSetLayoutEnvFilter;
+	vk::UniqueDescriptorSetLayout mDescriptorSetLayoutProjSH;
+	vk::UniqueDescriptorSetLayout mDescriptorSetLayoutConvSH;
 	vk::UniquePipelineLayout mPipelineLayout;
 	vk::UniquePipelineLayout mPipelineLayoutPost;
 	vk::UniquePipelineLayout mPipelineLayoutABRDF;
 	vk::UniquePipelineLayout mPipelineLayoutEnvFilter;
+	vk::UniquePipelineLayout mPipelineLayoutProjSH;
+	vk::UniquePipelineLayout mPipelineLayoutConvSH;
 	vk::UniquePipeline mPSO;
 	vk::UniquePipeline mPSOPost;
 	vk::UniquePipeline mPSOABRDF;
 	vk::UniquePipeline mPSOEnvFilter;
+	vk::UniquePipeline mPSOEnvDiffuse;
+	vk::UniquePipeline mPSOProjSH;
+	vk::UniquePipeline mPSOConvSH;
 
 	vk::Extent2D mSceneExtent;
 	vk::UniqueImage mSceneColor;
@@ -148,11 +155,17 @@ class VLK
 	vector<vk::UniqueImageView> mEnvMapMipView;
 	vector<vk::UniqueImageView> mEnvMapMipCubeView;
 	uint32_t mEnvMapMipLevels;
+	vk::UniqueImage mEnvDiffuseImg; // no mip
+	vk::UniqueImageView mEnvDiffuseView, mEnvDiffuseArrayView;
+	vk::Extent3D mEnvDiffuseExtent;
 	vk::UniqueDeviceMemory mImagesMemory;
 
 	vk::UniqueImage mAmbientBrdfImg;
 	vk::UniqueImageView mAmbientBrdfView;
 	vk::UniqueDeviceMemory mAmbientBrdfMemory;
+
+	vk::UniqueBuffer mSHBuf;
+	vk::UniqueDeviceMemory mSHMemory;
 
 	vk::UniqueSampler mSampler;
 	vk::UniqueSampler mEnvMapSampler;
@@ -468,6 +481,9 @@ public:
 				vk::DescriptorSetLayoutBinding(
 					10, vk::DescriptorType::eUniformBuffer, 1, vk::ShaderStageFlagBits::eFragment
 				),
+				vk::DescriptorSetLayoutBinding(
+					11, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eFragment
+				),
 			};
 			const auto descriptorSetLayoutInfo = vk::DescriptorSetLayoutCreateInfo(
 				{}, descriptorBinding
@@ -487,13 +503,16 @@ public:
 					2, vk::DescriptorType::eSampledImage, 1, vk::ShaderStageFlagBits::eFragment
 				),
 				vk::DescriptorSetLayoutBinding(
-					3, vk::DescriptorType::eSampler, 1, vk::ShaderStageFlagBits::eFragment
+					3, vk::DescriptorType::eSampledImage, 1, vk::ShaderStageFlagBits::eFragment
 				),
 				vk::DescriptorSetLayoutBinding(
-					4, vk::DescriptorType::eSampledImage, 1, vk::ShaderStageFlagBits::eFragment
+					4, vk::DescriptorType::eSampler, 1, vk::ShaderStageFlagBits::eFragment
 				),
 				vk::DescriptorSetLayoutBinding(
-					5, vk::DescriptorType::eSampler, 1, vk::ShaderStageFlagBits::eFragment
+					5, vk::DescriptorType::eSampledImage, 1, vk::ShaderStageFlagBits::eFragment
+				),
+				vk::DescriptorSetLayoutBinding(
+					6, vk::DescriptorType::eSampler, 1, vk::ShaderStageFlagBits::eFragment
 				),
 			};
 			const auto descriptorSetLayoutInfo = vk::DescriptorSetLayoutCreateInfo(
@@ -536,6 +555,29 @@ public:
 		);
 		mDescriptorSetLayoutEnvFilter = mDevice->createDescriptorSetLayoutUnique(descriptorSetLayoutInfoEnvFilter);
 
+		const auto descriptorBindingProjSH = {
+			vk::DescriptorSetLayoutBinding(
+				0, vk::DescriptorType::eSampledImage, 1, vk::ShaderStageFlagBits::eCompute
+			),
+			vk::DescriptorSetLayoutBinding(
+				1, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eCompute
+			),
+		};
+		const auto descriptorSetLayoutInfoProjSH = vk::DescriptorSetLayoutCreateInfo(
+			{}, descriptorBindingProjSH
+		);
+		mDescriptorSetLayoutProjSH = mDevice->createDescriptorSetLayoutUnique(descriptorSetLayoutInfoProjSH);
+
+		const auto descriptorBindingConvSH = {
+			vk::DescriptorSetLayoutBinding(
+				0, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eCompute
+			),
+		};
+		const auto descriptorSetLayoutInfoConvSH = vk::DescriptorSetLayoutCreateInfo(
+			{}, descriptorBindingConvSH
+		);
+		mDescriptorSetLayoutConvSH = mDevice->createDescriptorSetLayoutUnique(descriptorSetLayoutInfoConvSH);
+
 		// Create pipeline layouts
 		const auto pipelineDescSets = { *mDescriptorSetLayoutBuf, *mDescriptorSetLayoutTex };
 		mPipelineLayout = mDevice->createPipelineLayoutUnique(
@@ -549,6 +591,12 @@ public:
 		);
 		mPipelineLayoutEnvFilter = mDevice->createPipelineLayoutUnique(
 			vk::PipelineLayoutCreateInfo({}, *mDescriptorSetLayoutEnvFilter)
+		);
+		mPipelineLayoutProjSH = mDevice->createPipelineLayoutUnique(
+			vk::PipelineLayoutCreateInfo({}, *mDescriptorSetLayoutProjSH)
+		);
+		mPipelineLayoutConvSH = mDevice->createPipelineLayoutUnique(
+			vk::PipelineLayoutCreateInfo({}, *mDescriptorSetLayoutConvSH)
 		);
 
 		// Create modules
@@ -588,12 +636,14 @@ static const float MaxEnvMapMipLevel = 7.0;
 	float3 SunLightIntensity;
 	float3 SunLightDirection;
 };
+[[vk::binding(11, 0)]] StructuredBuffer<float> SHFactorBuf;
 [[vk::binding(0, 1)]] Texture2D BaseColor;
 [[vk::binding(1, 1)]] SamplerState SS;
 [[vk::binding(2, 1)]] TextureCube<float3> EnvMap;
-[[vk::binding(3, 1)]] SamplerState EnvMapSS;
-[[vk::binding(4, 1)]] Texture2D<float2> AmbientBrdf;
-[[vk::binding(5, 1)]] SamplerState AmbientBrdfSS;
+[[vk::binding(3, 1)]] TextureCube<float3> EnvDiffuseMap; // baked as SH
+[[vk::binding(4, 1)]] SamplerState EnvMapSS;
+[[vk::binding(5, 1)]] Texture2D<float2> AmbientBrdf;
+[[vk::binding(6, 1)]] SamplerState AmbientBrdfSS;
 struct Input {
 	float4 position : SV_Position;
 	float3 world : WorldPosition;
@@ -620,6 +670,9 @@ float V_SmithGGXCorrelated(float NoV, float NoL, float roughness) {
 float3 F_Schlick(float u, float3 f0, float f90 = 1.0) {
 	return f0 + (1.0 - f0) * pow(1.0 - u, 5.0);
 }
+float Fd_Lambert() {
+	return 1 / PI;
+}
 float Fd_Burley(float NoV, float NoL, float LoH, float roughness) {
 	float f90 = 0.5 + 2.0 * roughness * LoH * LoH;
 	float lightScatter = F_Schlick(NoL, 1.0, f90).x;
@@ -629,16 +682,43 @@ float Fd_Burley(float NoV, float NoL, float LoH, float roughness) {
 float computeLODFromRoughness(float perceptualRoughness) {
 	return (perceptualRoughness * MaxEnvMapMipLevel);
 }
-float3 ApproximateSpecularIBL(float3 SpecularColor, float Roughness, float3 N, float3 V) {
+float3 ApproximateSpecularIBL(float3 SpecularColor, float Roughness, float3 N, float3 V, out float2 EnvBRDF) {
 	float NoV = saturate(dot(N, V));
 	float3 R = 2 * dot(V, N) * N - V;
 	float lod = computeLODFromRoughness(Roughness);
 	float3 PrefilteredColor = EnvMap.SampleLevel(EnvMapSS, R, lod);
-	float2 EnvBRDF = AmbientBrdf.Sample(AmbientBrdfSS, float2(NoV, Roughness * Roughness), 0);
+	EnvBRDF = AmbientBrdf.SampleLevel(AmbientBrdfSS, float2(NoV, Roughness * Roughness), 0);
 	return PrefilteredColor * (SpecularColor * EnvBRDF.x + EnvBRDF.y);
 }
+float3 irradianceSH(float3 n, float3 sh[9]) {
+	float3 c =  sh[0]
+		+ sh[1] * n.y
+		+ sh[2] * n.z
+		+ sh[3] * n.x
+#if 1
+		+ sh[4] * (n.y * n.x)
+		+ sh[5] * (n.y * n.z)
+		+ sh[6] * (3 * n.z * n.z - 1)
+		+ sh[7] * (n.z * n.x)
+		+ sh[8] * (n.x * n.x - n.y * n.y)
+#endif
+		;
+	return max(0, c);
+}
+void readSH(out float3 sh[9]) {
+	sh[0] = float3(SHFactorBuf[0], SHFactorBuf[9], SHFactorBuf[18]);
+	sh[1] = float3(SHFactorBuf[1], SHFactorBuf[19], SHFactorBuf[19]);
+	sh[2] = float3(SHFactorBuf[2], SHFactorBuf[11], SHFactorBuf[20]);
+	sh[3] = float3(SHFactorBuf[3], SHFactorBuf[12], SHFactorBuf[21]);
+	sh[4] = float3(SHFactorBuf[4], SHFactorBuf[13], SHFactorBuf[22]);
+	sh[5] = float3(SHFactorBuf[5], SHFactorBuf[14], SHFactorBuf[23]);
+	sh[6] = float3(SHFactorBuf[6], SHFactorBuf[15], SHFactorBuf[24]);
+	sh[7] = float3(SHFactorBuf[7], SHFactorBuf[16], SHFactorBuf[25]);
+	sh[8] = float3(SHFactorBuf[8], SHFactorBuf[17], SHFactorBuf[26]);
+}
 float4 main(Input input) : SV_Target {
-	float4 baseColor = 1; //BaseColor.Sample(SS, input.texcoord);
+	//float4 baseColor = BaseColor.Sample(SS, input.texcoord);
+	float4 baseColor = 1; // White
 	float3 diffColor = (input.metallic > 0.0) ? 0.0 : baseColor.rgb;
 	float3 specColor = (input.metallic > 0.0) ? baseColor.rgb : F0.xxx;
 	input.normal = normalize(input.normal);
@@ -658,7 +738,14 @@ float4 main(Input input) : SV_Target {
 
 	float3 F = Fr + Fd * diffColor;
 	float3 lit = 0; //SunLightIntensity * F * dotNL;
-	lit += ApproximateSpecularIBL(specColor, input.roughness, input.normal, viewDir);
+	float2 envBrdf;
+	lit += ApproximateSpecularIBL(specColor, input.roughness, input.normal, viewDir, envBrdf);
+	float3 sh[9];
+	readSH(sh);
+	float3 specReflectance = lerp(envBrdf.x * specColor, envBrdf.y, specColor);
+	lit += irradianceSH(input.normal, sh) * diffColor * (1 - specReflectance) * Fd_Lambert();
+	//lit += EnvDiffuseMap.SampleLevel(EnvMapSS, input.normal,0) * diffColor * (1 - specReflectance) * Fd_Lambert();
+//lit=specReflectance;
 	return float4(lit, 1.0);
 }
 )#";
@@ -686,7 +773,7 @@ float3 linearToSrgb(float3 lin) {
 }
 float4 main() : SV_Target {
 	float3 color = Input.SubpassLoad().rgb;
-	float exposure = exp2(2.0); // fixed
+	float exposure = exp2(2.0); // You can change the EV
 	float lum = luminance(color);
 	float3 sat = color / max(lum, 0.00001);
 	color = sat * tonemapping(exposure * lum);
@@ -753,16 +840,18 @@ float2 DFG(float NoV, float a) {
 RWTexture2D<float2> Output;
 [numthreads(8, 8, 1)]
 void main(uint2 dtid : SV_DispatchThreadID) {
-	float percepturalRoughness = (0.5 + dtid.x) / 256;
+	float width, height;
+	Output.GetDimensions(width, height);
+	float percepturalRoughness = (0.5 + dtid.x) / width;
 	float roughness = percepturalRoughness * percepturalRoughness;
-	float dotNV = (0.5 + dtid.y) / 256;
+	float dotNV = (0.5 + dtid.y) / height;
 	Output[dtid] = DFG(roughness, dotNV);
 }
 )#";
 
 		static const char shaderCodeEnvFilterCS[] = R"#(
 #define PI (3.14159265f)
-static const uint sampleCount = 4096;
+static const uint sampleCount = 2048;
 static const float clampLuminance = 500;
 float3 importanceSampleGGX(float2 Xi, float Roughness, float3 N)
 {
@@ -821,7 +910,188 @@ void main(uint3 dtid : SV_DispatchThreadID) {
 	float roughness = 1.0 - ((float)firstbitlow(width) / firstbitlow(128));
 	float2 uv = ((float2)dtid.xy + 0.5) / float2(width, height);
 	float3 dir = directionFrom3D(uv.x * 2 - 1, uv.y * 2 - 1, dtid.z);
-	Output[dtid] = PrefilterEnvMap(roughness, dir);
+	Output[dtid] = PrefilterEnvMap(roughness, normalize(dir));
+}
+)#";
+
+		static const char shaderCodeEnvDiffuseCS[] = R"#(
+// https://seblagarde.files.wordpress.com/2015/07/course_notes_moving_frostbite_to_pbr_v32.pdf
+#define PI (3.14159265f)
+static const uint sampleCount = 32768;
+static const float clampLuminance = 8000;
+void importanceSampleCosDir(float2 u, float3 N, out float3 L, out float NdotL, out float pdf)
+{
+	// Local referencial
+	float3 upVector = abs(N.z) < 0.999 ? float3(0,0,1) : float3(1,0,0);
+	float3 tangentX = normalize(cross(upVector, N));
+	float3 tangentY = cross(N, tangentX);
+	float u1 = u.x;
+	float u2 = u.y;
+	float r = sqrt(u1);
+	float phi = u2 * PI * 2;
+	float3 L0 = float3(r * cos(phi), r * sin(phi), sqrt(max(0, 1 - u1)));
+	L = normalize(tangentX * L0.x + tangentY * L0.y + N * L0.z);
+	NdotL = dot(L, N);
+	pdf = NdotL / PI;
+}
+float2 hammersley(uint i, float numSamples) {
+	return float2(i / numSamples, reversebits(i) / 4294967296.0);
+}
+float3 directionFrom3D(float x, float y, uint z) {
+	switch (z) {
+	case 0: return float3(+1, -y, -x);
+	case 1: return float3(-1, -y, +x);
+	case 2: return float3(+x, +1, +y);
+	case 3: return float3(+x, -1, -y);
+	case 4: return float3(+x, -y, +1);
+	case 5: return float3(-x, -y, -1);
+	}
+	return (float3)0;
+}
+[[vk::binding(0, 0)]] TextureCube<float3> Input;
+[[vk::binding(1, 0)]] RWTexture2DArray<float3> Output;
+[[vk::binding(2, 0)]] SamplerState SS;
+float3 integrateDiffuseCube(float3 N) {
+	float3 accBrdf = 0;
+	for (uint i = 0; i < sampleCount; i++) {
+		float2 eta = hammersley(i, sampleCount);
+		float3 L;
+		float NdotL, pdf;
+		importanceSampleCosDir(eta, N, L, NdotL, pdf);
+		if (NdotL > 0) {
+			accBrdf += min(clampLuminance, Input.SampleLevel(SS, L, 0).rgb);
+		}
+	}
+	return (accBrdf / sampleCount);
+}
+[numthreads(8, 8, 1)]
+void main(uint3 dtid : SV_DispatchThreadID) {
+	float width, height, arrayLayer;
+	Output.GetDimensions(width, height, arrayLayer);
+	float2 uv = ((float2)dtid.xy + 0.5) / float2(width, height);
+	float3 dir = directionFrom3D(uv.x * 2 - 1, uv.y * 2 - 1, dtid.z);
+	Output[dtid] = integrateDiffuseCube(normalize(dir));
+}
+)#";
+
+		static const char shaderCodeProjSHCS[] = R"#(
+// https://github.com/microsoft/DirectXMath/blob/main/SHMath/DirectXSHD3D12.cpp (MIT License)
+// https://www.ppsloan.org/publications/StupidSH36.pdf
+// https://www.ppsloan.org/publications/SHJCGT.pdf
+#define PI (3.14159265f)
+float3 directionFrom3D(float x, float y, uint z) {
+	switch (z) {
+	case 0: return float3(+1, -y, -x);
+	case 1: return float3(-1, -y, +x);
+	case 2: return float3(+x, +1, +y);
+	case 3: return float3(+x, -1, -y);
+	case 4: return float3(+x, -y, +1);
+	case 5: return float3(-x, -y, -1);
+	}
+	return (float3)0;
+}
+void SHNewEval3(float fX, float fY, float fZ, out float pSH[9]) {
+	float fC0, fC1, fS0, fS1, fTmpA, fTmpB, fTmpC;
+	float fZ2 = fZ * fZ;
+	pSH[0] = 0.2820947917738781;
+	pSH[2] = 0.4886025119029199 * fZ;
+	pSH[6] = 0.9461746957575601 * fZ2 - 0.3153915652525201;
+	fC0 = fX;
+	fS0 = fY;
+	fTmpA = -0.48860251190292;
+	pSH[3] = fTmpA * fC0;
+	pSH[1] = fTmpA * fS0;
+	fTmpB = -1.092548430592079 * fZ;
+	pSH[7] = fTmpB * fC0;
+	pSH[5] = fTmpB * fS0;
+	fC1 = fX * fC0 - fY * fS0;
+	fS1 = fX * fS0 + fY * fC0;
+	fTmpC = 0.5462742152960395;
+	pSH[8] = fTmpC * fC1;
+	pSH[4] = fTmpC * fS1;
+}
+void SHScale(float input[9], float scale, out float output[9]) {
+	for (int i = 0; i < 9; ++i) {
+		output[i] = input[i] * scale;
+	}
+}
+void SHAdd(float inputA[9], float inputB[9], out float output[9]) {
+	for (int i = 0; i < 9; ++i) {
+		output[i] = inputA[i] + inputB[i];
+	}
+}
+int toFixedPointWt(float input) {
+	return int(input * 16384);
+}
+void toFixedPoint(float input[9], out int output[9]) {
+	for (int i = 0; i < 9; ++i) {
+		output[i] = int(input[i] * 65536);
+	}
+}
+[[vk::binding(0, 0)]] Texture2DArray<float3> Input;
+[[vk::binding(1, 0)]] RWStructuredBuffer<uint> Output;
+void writeSH(int r[9], int idx) {
+	for (int i = 0; i < 9; ++i) {
+		InterlockedAdd(Output[9 * idx + i], r[i]);
+	}
+}
+void processProjectSH(float3 dir, float3 color, float fSize, uint2 idx) {
+	float fPicSize = 1 / fSize;
+	float fB = -1 + 1 / fSize;
+	float fS = 2 * (1 - 1 / fSize) / (fSize - 1);
+	const float v = (float)idx.y * fS + fB;
+	const float u = (float)idx.x * fS + fB;
+	const float fDiffSolid = 4 / ((1 + u * u + v * v) * sqrt(1 + u * u + v * v));
+	float basis[9];
+	SHNewEval3(dir.x, dir.y, dir.z, basis);
+	float tempR[9], tempG[9], tempB[9];
+	SHScale(basis, color.r * fDiffSolid, tempR);
+	SHScale(basis, color.g * fDiffSolid, tempG);
+	SHScale(basis, color.b * fDiffSolid, tempB);
+	int iTempR[9], iTempG[9], iTempB[9];
+	toFixedPoint(tempR, iTempR);
+	toFixedPoint(tempG, iTempG);
+	toFixedPoint(tempB, iTempB);
+	int iWt = toFixedPointWt(fDiffSolid);
+	writeSH(iTempR, 0);
+	writeSH(iTempG, 1);
+	writeSH(iTempB, 2);
+	InterlockedAdd(Output[27], iWt);
+}
+[numthreads(8, 8, 1)]
+void main(uint3 dtid : SV_DispatchThreadID) {
+	float width, height, arrayLayer;
+	Input.GetDimensions(width, height, arrayLayer);
+	float2 uv = ((float2)dtid.xy + 0.5) / float2(width, height);
+	float3 dir = directionFrom3D(uv.x * 2 - 1, uv.y * 2 - 1, dtid.z);
+	float3 color = Input.Load(int4(dtid, 0));
+	processProjectSH(normalize(dir), color, width, dtid.xy);
+}
+)#";
+
+		static const char shaderCodeConvSHCS[] = R"#(
+#define PI (3.14159265f)
+float fromFixedPointWt(int input) {
+	return float(input) / 16384;
+}
+void fromFixedPoint(int input, out float output) {
+	output = float(input) / 65536;
+}
+[[vk::binding(0, 0)]] RWStructuredBuffer<uint> InOut;
+groupshared float sNorm;
+[numthreads(27, 1, 1)]
+void main(uint dtid : SV_DispatchThreadID) {
+	if (dtid == 0) {
+		sNorm = 4 * PI / fromFixedPointWt(InOut[27]);
+		InOut[27] = asuint(sNorm);
+	}
+	GroupMemoryBarrierWithGroupSync();
+	uint vFixed = InOut[dtid];
+	float v;
+	fromFixedPoint(vFixed, v);
+	float normProj = sNorm;
+	v *= normProj;
+	InOut[dtid] = asuint(v);
 }
 )#";
 
@@ -832,15 +1102,20 @@ void main(uint3 dtid : SV_DispatchThreadID) {
 		ComPtr<IDxcLibrary> dxcLib;
 		CHK(DxcCreateInstance(CLSID_DxcLibrary, IID_PPV_ARGS(&dxcLib)));
 
-		ComPtr<IDxcBlobEncoding> dxcTxtSceneVS, dxcTxtScenePS, dxcTxtPostVS, dxcTxtPostPS, dxcTxtABRDFCS, dxcTxtEnvFilterCS;
+		ComPtr<IDxcBlobEncoding> dxcTxtSceneVS, dxcTxtScenePS, dxcTxtPostVS, dxcTxtPostPS,
+			dxcTxtABRDFCS, dxcTxtEnvFilterCS, dxcTxtEnvDiffuseCS, dxcTxtProjSHCS, dxcTxtConvSHCS;
 		CHK(dxcLib->CreateBlobWithEncodingFromPinned(shaderCodeSceneVS, _countof(shaderCodeSceneVS) - 1, CP_UTF8, &dxcTxtSceneVS));
 		CHK(dxcLib->CreateBlobWithEncodingFromPinned(shaderCodeScenePS, _countof(shaderCodeScenePS) - 1, CP_UTF8, &dxcTxtScenePS));
 		CHK(dxcLib->CreateBlobWithEncodingFromPinned(shaderCodePostVS, _countof(shaderCodePostVS) - 1, CP_UTF8, &dxcTxtPostVS));
 		CHK(dxcLib->CreateBlobWithEncodingFromPinned(shaderCodePostPS, _countof(shaderCodePostPS) - 1, CP_UTF8, &dxcTxtPostPS));
 		CHK(dxcLib->CreateBlobWithEncodingFromPinned(shaderCodeABRDFCS, _countof(shaderCodeABRDFCS) - 1, CP_UTF8, &dxcTxtABRDFCS));
 		CHK(dxcLib->CreateBlobWithEncodingFromPinned(shaderCodeEnvFilterCS, _countof(shaderCodeEnvFilterCS) - 1, CP_UTF8, &dxcTxtEnvFilterCS));
+		CHK(dxcLib->CreateBlobWithEncodingFromPinned(shaderCodeEnvDiffuseCS, _countof(shaderCodeEnvDiffuseCS) - 1, CP_UTF8, &dxcTxtEnvDiffuseCS));
+		CHK(dxcLib->CreateBlobWithEncodingFromPinned(shaderCodeProjSHCS, _countof(shaderCodeProjSHCS) - 1, CP_UTF8, &dxcTxtProjSHCS));
+		CHK(dxcLib->CreateBlobWithEncodingFromPinned(shaderCodeConvSHCS, _countof(shaderCodeConvSHCS) - 1, CP_UTF8, &dxcTxtConvSHCS));
 
-		ComPtr<IDxcBlob> dxcBlobSceneVS, dxcBlobScenePS, dxcBlobPostVS, dxcBlobPostPS, dxcBlobABRDFCS, dxcBlobEnvFilterCS;
+		ComPtr<IDxcBlob> dxcBlobSceneVS, dxcBlobScenePS, dxcBlobPostVS, dxcBlobPostPS,
+			dxcBlobABRDFCS, dxcBlobEnvFilterCS, dxcBlobEnvDiffuseCS, dxcBlobProjSHCS, dxcBlobConvSHCS;
 		ComPtr<IDxcBlobEncoding> dxcError;
 		ComPtr<IDxcOperationResult> dxcRes;
 		const wchar_t* shaderArgsVS[] = {
@@ -895,6 +1170,27 @@ void main(uint3 dtid : SV_DispatchThreadID) {
 			throw runtime_error("Shader compile error.");
 		}
 		dxcRes->GetResult(&dxcBlobEnvFilterCS);
+		dxc->Compile(dxcTxtEnvDiffuseCS.Get(), nullptr, L"main", L"cs_6_0", shaderArgsCS, _countof(shaderArgsCS), nullptr, 0, nullptr, &dxcRes);
+		dxcRes->GetErrorBuffer(&dxcError);
+		if (dxcError->GetBufferSize()) {
+			OutputDebugStringA(reinterpret_cast<char*>(dxcError->GetBufferPointer()));
+			throw runtime_error("Shader compile error.");
+		}
+		dxcRes->GetResult(&dxcBlobEnvDiffuseCS);
+		dxc->Compile(dxcTxtProjSHCS.Get(), nullptr, L"main", L"cs_6_0", shaderArgsCS, _countof(shaderArgsCS), nullptr, 0, nullptr, &dxcRes);
+		dxcRes->GetErrorBuffer(&dxcError);
+		if (dxcError->GetBufferSize()) {
+			OutputDebugStringA(reinterpret_cast<char*>(dxcError->GetBufferPointer()));
+			throw runtime_error("Shader compile error.");
+		}
+		dxcRes->GetResult(&dxcBlobProjSHCS);
+		dxc->Compile(dxcTxtConvSHCS.Get(), nullptr, L"main", L"cs_6_0", shaderArgsCS, _countof(shaderArgsCS), nullptr, 0, nullptr, &dxcRes);
+		dxcRes->GetErrorBuffer(&dxcError);
+		if (dxcError->GetBufferSize()) {
+			OutputDebugStringA(reinterpret_cast<char*>(dxcError->GetBufferPointer()));
+			throw runtime_error("Shader compile error.");
+		}
+		dxcRes->GetResult(&dxcBlobConvSHCS);
 
 		const auto vsCreateInfo = vk::ShaderModuleCreateInfo(
 			{}, dxcBlobSceneVS->GetBufferSize(), reinterpret_cast<uint32_t*>(dxcBlobSceneVS->GetBufferPointer()));
@@ -914,6 +1210,15 @@ void main(uint3 dtid : SV_DispatchThreadID) {
 		const auto csEnvFilterCreateInfo = vk::ShaderModuleCreateInfo(
 			{}, dxcBlobEnvFilterCS->GetBufferSize(), reinterpret_cast<uint32_t*>(dxcBlobEnvFilterCS->GetBufferPointer()));
 		auto csEnvFilterModule = mDevice->createShaderModuleUnique(csEnvFilterCreateInfo);
+		const auto csEnvDiffuseCreateInfo = vk::ShaderModuleCreateInfo(
+			{}, dxcBlobEnvDiffuseCS->GetBufferSize(), reinterpret_cast<uint32_t*>(dxcBlobEnvDiffuseCS->GetBufferPointer()));
+		auto csEnvDiffuseModule = mDevice->createShaderModuleUnique(csEnvDiffuseCreateInfo);
+		const auto csProjSHCreateInfo = vk::ShaderModuleCreateInfo(
+			{}, dxcBlobProjSHCS->GetBufferSize(), reinterpret_cast<uint32_t*>(dxcBlobProjSHCS->GetBufferPointer()));
+		auto csProjSHModule = mDevice->createShaderModuleUnique(csProjSHCreateInfo);
+		const auto csConvSHCreateInfo = vk::ShaderModuleCreateInfo(
+			{}, dxcBlobConvSHCS->GetBufferSize(), reinterpret_cast<uint32_t*>(dxcBlobConvSHCS->GetBufferPointer()));
+		auto csConvSHModule = mDevice->createShaderModuleUnique(csConvSHCreateInfo);
 
 		// Create PSOs
 		const auto pipelineShadersInfo = {
@@ -988,6 +1293,25 @@ void main(uint3 dtid : SV_DispatchThreadID) {
 		vkres = mDevice->createComputePipelineUnique(nullptr, envFilterPipelineInfo);
 		CHK(vkres.result);
 		mPSOEnvFilter = std::move(vkres.value);
+
+		const auto envDiffusePipelineShadersInfo = vk::PipelineShaderStageCreateInfo({}, vk::ShaderStageFlagBits::eCompute, *csEnvDiffuseModule, "main");
+		// Reuse the pipeline layout
+		const auto envDiffusePipelineInfo = vk::ComputePipelineCreateInfo({}, envDiffusePipelineShadersInfo, *mPipelineLayoutEnvFilter);
+		vkres = mDevice->createComputePipelineUnique(nullptr, envDiffusePipelineInfo);
+		CHK(vkres.result);
+		mPSOEnvDiffuse = std::move(vkres.value);
+
+		const auto projSHPipelineShadersInfo = vk::PipelineShaderStageCreateInfo({}, vk::ShaderStageFlagBits::eCompute, *csProjSHModule, "main");
+		const auto projSHPipelineInfo = vk::ComputePipelineCreateInfo({}, projSHPipelineShadersInfo, *mPipelineLayoutProjSH);
+		vkres = mDevice->createComputePipelineUnique(nullptr, projSHPipelineInfo);
+		CHK(vkres.result);
+		mPSOProjSH = std::move(vkres.value);
+
+		const auto convSHPipelineShadersInfo = vk::PipelineShaderStageCreateInfo({}, vk::ShaderStageFlagBits::eCompute, *csConvSHModule, "main");
+		const auto convSHPipelineInfo = vk::ComputePipelineCreateInfo({}, convSHPipelineShadersInfo, *mPipelineLayoutConvSH);
+		vkres = mDevice->createComputePipelineUnique(nullptr, convSHPipelineInfo);
+		CHK(vkres.result);
+		mPSOConvSH = std::move(vkres.value);
 
 		// Get memory props
 		const auto memoryProps = physDevice.getMemoryProperties();
@@ -1361,9 +1685,19 @@ void main(uint3 dtid : SV_DispatchThreadID) {
 			vk::SharingMode::eExclusive, {}, vk::ImageLayout::eUndefined
 		));
 		const auto envMapMemReq = mDevice->getImageMemoryRequirements(*mEnvMapImg);
+		mEnvDiffuseExtent = vk::Extent3D(envMapData[0].extent.width / 4, envMapData[0].extent.height / 4, 1);
+		mEnvDiffuseImg = mDevice->createImageUnique(vk::ImageCreateInfo(
+			vk::ImageCreateFlagBits::eCubeCompatible,
+			vk::ImageType::e2D, vk::Format::eR16G16B16A16Sfloat, mEnvDiffuseExtent,
+			1, 6, vk::SampleCountFlagBits::e1, vk::ImageTiling::eOptimal,
+			vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eStorage,
+			vk::SharingMode::eExclusive, {}, vk::ImageLayout::eUndefined
+		));
+		const auto envDiffuseMemReq = mDevice->getImageMemoryRequirements(*mEnvDiffuseImg);
 		mImagesMemory = mDevice->allocateMemoryUnique(vk::MemoryAllocateInfo(
-			ALIGN(ALIGN(sailboatMemReq.size, lennaMemReq.alignment) + lennaMemReq.size
-				, envMapMemReq.alignment) + envMapMemReq.size,
+			ALIGN(ALIGN(ALIGN(sailboatMemReq.size, lennaMemReq.alignment) + lennaMemReq.size
+				, envMapMemReq.alignment) + envMapMemReq.size
+				, envDiffuseMemReq.alignment) + envDiffuseMemReq.size,
 			GetMemTypeIndex(sailboatMemReq, false)
 		));
 		mDevice->bindImageMemory(*mSailboatImg, *mImagesMemory, 0);
@@ -1371,6 +1705,8 @@ void main(uint3 dtid : SV_DispatchThreadID) {
 		mDevice->bindImageMemory(*mLennaImg, *mImagesMemory, imgMemOffset);
 		imgMemOffset = ALIGN(imgMemOffset + lennaMemReq.size, envMapMemReq.alignment);
 		mDevice->bindImageMemory(*mEnvMapImg, *mImagesMemory, imgMemOffset);
+		imgMemOffset = ALIGN(imgMemOffset + envMapMemReq.size, envDiffuseMemReq.alignment);
+		mDevice->bindImageMemory(*mEnvDiffuseImg, *mImagesMemory, imgMemOffset);
 		mSailboatView = mDevice->createImageViewUnique(vk::ImageViewCreateInfo(
 			{}, *mSailboatImg, vk::ImageViewType::e2D, vk::Format::eR8G8B8A8Unorm, {},
 			vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, mSailboatMipLevels, 0, 1)
@@ -1396,6 +1732,25 @@ void main(uint3 dtid : SV_DispatchThreadID) {
 				vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, i, 1, 0, VK_REMAINING_ARRAY_LAYERS)
 			));
 		}
+		mEnvDiffuseView = mDevice->createImageViewUnique(vk::ImageViewCreateInfo(
+			{}, *mEnvDiffuseImg, vk::ImageViewType::eCube, vk::Format::eR16G16B16A16Sfloat, {},
+			vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 6)
+		));
+		mEnvDiffuseArrayView = mDevice->createImageViewUnique(vk::ImageViewCreateInfo(
+			{}, *mEnvDiffuseImg, vk::ImageViewType::e2DArray, vk::Format::eR16G16B16A16Sfloat, {},
+			vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 6)
+		));
+
+		// Create a SH buffer
+		mSHBuf = mDevice->createBufferUnique(vk::BufferCreateInfo(
+			{}, sizeof(float) * (9 * 3 + 1),
+			vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eTransferDst
+		));
+		const auto shMemReq = mDevice->getBufferMemoryRequirements(*mSHBuf);
+		mSHMemory = mDevice->allocateMemoryUnique(vk::MemoryAllocateInfo(
+			shMemReq.size, GetMemTypeIndex(shMemReq, false)
+		));
+		mDevice->bindBufferMemory(*mSHBuf, *mSHMemory, 0);
 
 		// Upload image data
 		pData = reinterpret_cast<uint8_t*>(mDevice->mapMemory(*mImageUploadMemory, 0, VK_WHOLE_SIZE));
@@ -1599,15 +1954,16 @@ void main(uint3 dtid : SV_DispatchThreadID) {
 				{}, {}, barriers);
 		}
 
-		// Compute ambinet BRDF
+		// Precompute IBL
 		if (mFrameCount == 1)
 		{
+			// Generate ambinet BRDF
 			cmdBuf.pipelineBarrier(
 				vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eComputeShader, {},
 				{}, {}, vk::ImageMemoryBarrier(
 					{}/*ignored*/, vk::AccessFlagBits::eShaderWrite,
 					vk::ImageLayout::eUndefined, vk::ImageLayout::eGeneral,
-					mQueueFamilyGfxIdx, mQueueFamilyGfxIdx, * mAmbientBrdfImg,
+					mQueueFamilyGfxIdx, mQueueFamilyGfxIdx, *mAmbientBrdfImg,
 					vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1)
 				));
 
@@ -1615,10 +1971,12 @@ void main(uint3 dtid : SV_DispatchThreadID) {
 			auto descSets = mDevice->allocateDescriptorSets(vk::DescriptorSetAllocateInfo(
 				*mDescPools[mFrameCount % 2], *mDescriptorSetLayoutABRDF
 			));
-			auto abrdfImageInfo = vk::DescriptorImageInfo( {}, *mAmbientBrdfView, vk::ImageLayout::eGeneral);
-			auto wdesc = vk::WriteDescriptorSet(
-				descSets[0], 0, 0, 1, vk::DescriptorType::eStorageImage
-			).setImageInfo(abrdfImageInfo);
+			auto abrdfImageInfo = vk::DescriptorImageInfo({}, *mAmbientBrdfView, vk::ImageLayout::eGeneral);
+			auto wdesc = {
+				vk::WriteDescriptorSet(
+					descSets[0], 0, 0, 1, vk::DescriptorType::eStorageImage
+				).setImageInfo(abrdfImageInfo)
+			};
 			mDevice->updateDescriptorSets(wdesc, {});
 			cmdBuf.bindDescriptorSets(
 				vk::PipelineBindPoint::eCompute, *mPipelineLayoutABRDF, 0, descSets[0], {}
@@ -1631,10 +1989,11 @@ void main(uint3 dtid : SV_DispatchThreadID) {
 				{}, {}, vk::ImageMemoryBarrier(
 					vk::AccessFlagBits::eShaderWrite, vk::AccessFlagBits::eShaderRead,
 					vk::ImageLayout::eGeneral, vk::ImageLayout::eShaderReadOnlyOptimal,
-					mQueueFamilyGfxIdx, mQueueFamilyGfxIdx, * mAmbientBrdfImg,
+					mQueueFamilyGfxIdx, mQueueFamilyGfxIdx, *mAmbientBrdfImg,
 					vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1)
 				));
 
+			// Generate GGX prefiltered cubemaps
 			for (int i = 1; i < (int)mEnvMapMipLevels; ++i)
 			{
 				cmdBuf.pipelineBarrier(
@@ -1678,10 +2037,139 @@ void main(uint3 dtid : SV_DispatchThreadID) {
 					{}, {}, vk::ImageMemoryBarrier(
 						vk::AccessFlagBits::eShaderWrite, vk::AccessFlagBits::eShaderRead,
 						vk::ImageLayout::eGeneral, vk::ImageLayout::eShaderReadOnlyOptimal,
-						mQueueFamilyGfxIdx, mQueueFamilyGfxIdx, * mEnvMapImg,
+						mQueueFamilyGfxIdx, mQueueFamilyGfxIdx, *mEnvMapImg,
 						vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, i, 1, 0, 6)
 					));
 			}
+
+			// Generate a illuminance map
+			cmdBuf.pipelineBarrier(
+				vk::PipelineStageFlagBits::eTopOfPipe,
+				vk::PipelineStageFlagBits::eComputeShader, {},
+				{}, {}, vk::ImageMemoryBarrier(
+					{/*no access*/ }, vk::AccessFlagBits::eShaderWrite,
+					vk::ImageLayout::eUndefined, vk::ImageLayout::eGeneral,
+					mQueueFamilyGfxIdx, mQueueFamilyGfxIdx, *mEnvDiffuseImg,
+					vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 6)
+				));
+
+			cmdBuf.bindPipeline(vk::PipelineBindPoint::eCompute, *mPSOEnvDiffuse);
+			{
+				auto descSets = mDevice->allocateDescriptorSets(vk::DescriptorSetAllocateInfo(
+					*mDescPools[mFrameCount % 2], *mDescriptorSetLayoutEnvFilter
+				));
+				auto envMapImageInfo = vk::DescriptorImageInfo({}, *mEnvMapView, vk::ImageLayout::eShaderReadOnlyOptimal);
+				auto envDiffuseImageInfo = vk::DescriptorImageInfo({}, *mEnvDiffuseArrayView, vk::ImageLayout::eGeneral);
+				auto sampler = vk::DescriptorImageInfo(*mEnvMapSampler, {}, {});
+				auto wdesc = {
+					vk::WriteDescriptorSet(
+						descSets[0], 0, 0, 1, vk::DescriptorType::eSampledImage
+					).setImageInfo(envMapImageInfo),
+					vk::WriteDescriptorSet(
+						descSets[0], 1, 0, 1, vk::DescriptorType::eStorageImage
+					).setImageInfo(envDiffuseImageInfo),
+					vk::WriteDescriptorSet(
+						descSets[0], 2, 0, 1, vk::DescriptorType::eSampler
+					).setImageInfo(sampler),
+				};
+				mDevice->updateDescriptorSets(wdesc, {});
+				cmdBuf.bindDescriptorSets(
+					vk::PipelineBindPoint::eCompute, *mPipelineLayoutEnvFilter, 0, descSets[0], {}
+				);
+			}
+			cmdBuf.dispatch((mEnvDiffuseExtent.width + 7) / 8, (mEnvDiffuseExtent.height + 7) / 8, 6);
+
+			cmdBuf.pipelineBarrier(
+				vk::PipelineStageFlagBits::eComputeShader,
+				vk::PipelineStageFlagBits::eComputeShader | vk::PipelineStageFlagBits::eFragmentShader, {},
+				{}, {}, vk::ImageMemoryBarrier(
+					vk::AccessFlagBits::eShaderWrite, vk::AccessFlagBits::eShaderRead,
+					vk::ImageLayout::eGeneral, vk::ImageLayout::eShaderReadOnlyOptimal,
+					mQueueFamilyGfxIdx, mQueueFamilyGfxIdx, *mEnvDiffuseImg,
+					vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 6)
+				));
+
+			// Calculate SH factors for the irradiance map
+			cmdBuf.pipelineBarrier(
+				vk::PipelineStageFlagBits::eTopOfPipe,
+				vk::PipelineStageFlagBits::eTransfer, {},
+				{}, vk::BufferMemoryBarrier(
+					{/*no access*/ }, vk::AccessFlagBits::eTransferWrite,
+					mQueueFamilyGfxIdx, mQueueFamilyGfxIdx,
+					*mSHBuf, 0, VK_WHOLE_SIZE
+				), {});
+			cmdBuf.fillBuffer(*mSHBuf, 0, VK_WHOLE_SIZE, 0u);
+			cmdBuf.pipelineBarrier(
+				vk::PipelineStageFlagBits::eTransfer,
+				vk::PipelineStageFlagBits::eComputeShader, {},
+				{}, vk::BufferMemoryBarrier(
+					vk::AccessFlagBits::eTransferWrite,
+					vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite,
+					mQueueFamilyGfxIdx, mQueueFamilyGfxIdx,
+					*mSHBuf, 0, VK_WHOLE_SIZE
+				), {});
+
+			cmdBuf.bindPipeline(vk::PipelineBindPoint::eCompute, *mPSOProjSH);
+			{
+				auto descSets = mDevice->allocateDescriptorSets(vk::DescriptorSetAllocateInfo(
+					*mDescPools[mFrameCount % 2], *mDescriptorSetLayoutProjSH
+				));
+				auto envDiffuseImageInfo = vk::DescriptorImageInfo({}, *mEnvDiffuseArrayView, vk::ImageLayout::eShaderReadOnlyOptimal);
+				auto shBufInfo = vk::DescriptorBufferInfo(*mSHBuf, 0, VK_WHOLE_SIZE);
+				auto wdesc = {
+					vk::WriteDescriptorSet(
+						descSets[0], 0, 0, 1, vk::DescriptorType::eSampledImage
+					).setImageInfo(envDiffuseImageInfo),
+					vk::WriteDescriptorSet(
+						descSets[0], 1, 0, 1, vk::DescriptorType::eStorageBuffer
+					).setBufferInfo(shBufInfo),
+				};
+				mDevice->updateDescriptorSets(wdesc, {});
+				cmdBuf.bindDescriptorSets(
+					vk::PipelineBindPoint::eCompute, *mPipelineLayoutProjSH, 0, descSets[0], {}
+				);
+			}
+			cmdBuf.dispatch((mEnvDiffuseExtent.width + 7) / 8, (mEnvDiffuseExtent.height + 7) / 8, 6);
+
+			// Convert SH factors from fixed point value to float value
+			cmdBuf.pipelineBarrier(
+				vk::PipelineStageFlagBits::eComputeShader,
+				vk::PipelineStageFlagBits::eComputeShader, {},
+				{}, vk::BufferMemoryBarrier(
+					vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite,
+					vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite,
+					mQueueFamilyGfxIdx, mQueueFamilyGfxIdx,
+					*mSHBuf, 0, VK_WHOLE_SIZE
+				), {});
+
+			cmdBuf.bindPipeline(vk::PipelineBindPoint::eCompute, *mPSOConvSH);
+			{
+				auto descSets = mDevice->allocateDescriptorSets(vk::DescriptorSetAllocateInfo(
+					*mDescPools[mFrameCount % 2], *mDescriptorSetLayoutConvSH
+				));
+				auto shBufInfo = vk::DescriptorBufferInfo(*mSHBuf, 0, VK_WHOLE_SIZE);
+				auto wdesc = {
+					vk::WriteDescriptorSet(
+						descSets[0], 0, 0, 1, vk::DescriptorType::eStorageBuffer
+					).setBufferInfo(shBufInfo),
+				};
+				mDevice->updateDescriptorSets(wdesc, {});
+				cmdBuf.bindDescriptorSets(
+					vk::PipelineBindPoint::eCompute, *mPipelineLayoutConvSH, 0, descSets[0], {}
+				);
+			}
+			cmdBuf.dispatch(1, 1, 1);
+
+			// Wait for previous shaders
+			cmdBuf.pipelineBarrier(
+				vk::PipelineStageFlagBits::eComputeShader,
+				vk::PipelineStageFlagBits::eFragmentShader, {},
+				{}, vk::BufferMemoryBarrier(
+					vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite,
+					vk::AccessFlagBits::eShaderRead,
+					mQueueFamilyGfxIdx, mQueueFamilyGfxIdx,
+					*mSHBuf, 0, VK_WHOLE_SIZE
+				), {});
 		}
 
 		auto srgbToLinear = [](std::array<float, 4> srgb) {
@@ -1717,9 +2205,11 @@ void main(uint3 dtid : SV_DispatchThreadID) {
 		vk::WriteDescriptorSet wdescSets[10];
 		auto descBufInfo = vk::DescriptorBufferInfo(*mUniformBuffers[mFrameCount % 2], 0, 2048);
 		auto descLightBufInfo = vk::DescriptorBufferInfo(*mUniformBuffers[mFrameCount % 2], 2048, 2048);
+		auto descSHBufInfo = vk::DescriptorBufferInfo(*mSHBuf, 0, VK_WHOLE_SIZE);
 		auto descTexInfo = vk::DescriptorImageInfo({}, *mSailboatView, vk::ImageLayout::eShaderReadOnlyOptimal);
 		auto descSamplerInfo = vk::DescriptorImageInfo(*mSampler, {}, {});
 		const auto descEnvMapInfo = vk::DescriptorImageInfo({}, *mEnvMapView, vk::ImageLayout::eShaderReadOnlyOptimal);
+		const auto descEnvDiffuseInfo = vk::DescriptorImageInfo({}, *mEnvDiffuseView, vk::ImageLayout::eShaderReadOnlyOptimal);
 		const auto descEnvMapSamplerInfo = vk::DescriptorImageInfo(*mEnvMapSampler, {}, {});
 		const auto descABRDFInfo = vk::DescriptorImageInfo({}, *mAmbientBrdfView, vk::ImageLayout::eShaderReadOnlyOptimal);
 		const auto descABRDFSamplerInfo = vk::DescriptorImageInfo(*mAmbientBrdfSampler, {}, {});
@@ -1736,18 +2226,24 @@ void main(uint3 dtid : SV_DispatchThreadID) {
 			mSphereDescSetTex[mFrameCount % 2], 2, 0, 1, vk::DescriptorType::eSampledImage
 		).setImageInfo(descEnvMapInfo);
 		wdescSets[4] = vk::WriteDescriptorSet(
-			mSphereDescSetTex[mFrameCount % 2], 3, 0, 1, vk::DescriptorType::eSampler
-		).setImageInfo(descEnvMapSamplerInfo);
+			mSphereDescSetTex[mFrameCount % 2], 3, 0, 1, vk::DescriptorType::eSampledImage
+		).setImageInfo(descEnvDiffuseInfo);
 		wdescSets[5] = vk::WriteDescriptorSet(
-			mSphereDescSetTex[mFrameCount % 2], 4, 0, 1, vk::DescriptorType::eSampledImage
-		).setImageInfo(descABRDFInfo);
+			mSphereDescSetTex[mFrameCount % 2], 4, 0, 1, vk::DescriptorType::eSampler
+		).setImageInfo(descEnvMapSamplerInfo);
 		wdescSets[6] = vk::WriteDescriptorSet(
-			mSphereDescSetTex[mFrameCount % 2], 5, 0, 1, vk::DescriptorType::eSampler
-		).setImageInfo(descABRDFSamplerInfo);
+			mSphereDescSetTex[mFrameCount % 2], 5, 0, 1, vk::DescriptorType::eSampledImage
+		).setImageInfo(descABRDFInfo);
 		wdescSets[7] = vk::WriteDescriptorSet(
+			mSphereDescSetTex[mFrameCount % 2], 6, 0, 1, vk::DescriptorType::eSampler
+		).setImageInfo(descABRDFSamplerInfo);
+		wdescSets[8] = vk::WriteDescriptorSet(
 			mSphereDescSetBuf[mFrameCount % 2], 10, 0, 1, vk::DescriptorType::eUniformBuffer
 		).setBufferInfo(descLightBufInfo);
-		mDevice->updateDescriptorSets(8, wdescSets, 0, nullptr);
+		wdescSets[9] = vk::WriteDescriptorSet(
+			mSphereDescSetBuf[mFrameCount % 2], 11, 0, 1, vk::DescriptorType::eStorageBuffer
+		).setBufferInfo(descSHBufInfo);
+		mDevice->updateDescriptorSets(10, wdescSets, 0, nullptr);
 		cmdBuf.setViewport(0, vk::Viewport(0, 0, (float)mSceneExtent.width, (float)mSceneExtent.height, 0, 1));
 		vk::Rect2D scissor({}, mSceneExtent);
 		cmdBuf.setScissor(0, scissor);
@@ -1789,18 +2285,24 @@ void main(uint3 dtid : SV_DispatchThreadID) {
 			mPlaneDescSetTex[mFrameCount % 2], 2, 0, 1, vk::DescriptorType::eSampledImage
 		).setImageInfo(descEnvMapInfo);
 		wdescSets[4] = vk::WriteDescriptorSet(
-			mPlaneDescSetTex[mFrameCount % 2], 3, 0, 1, vk::DescriptorType::eSampler
-		).setImageInfo(descEnvMapSamplerInfo);
+			mPlaneDescSetTex[mFrameCount % 2], 3, 0, 1, vk::DescriptorType::eSampledImage
+		).setImageInfo(descEnvDiffuseInfo);
 		wdescSets[5] = vk::WriteDescriptorSet(
-			mPlaneDescSetTex[mFrameCount % 2], 4, 0, 1, vk::DescriptorType::eSampledImage
-		).setImageInfo(descABRDFInfo);
+			mPlaneDescSetTex[mFrameCount % 2], 4, 0, 1, vk::DescriptorType::eSampler
+		).setImageInfo(descEnvMapSamplerInfo);
 		wdescSets[6] = vk::WriteDescriptorSet(
-			mPlaneDescSetTex[mFrameCount % 2], 5, 0, 1, vk::DescriptorType::eSampler
-		).setImageInfo(descABRDFSamplerInfo);
+			mPlaneDescSetTex[mFrameCount % 2], 5, 0, 1, vk::DescriptorType::eSampledImage
+		).setImageInfo(descABRDFInfo);
 		wdescSets[7] = vk::WriteDescriptorSet(
+			mPlaneDescSetTex[mFrameCount % 2], 6, 0, 1, vk::DescriptorType::eSampler
+		).setImageInfo(descABRDFSamplerInfo);
+		wdescSets[8] = vk::WriteDescriptorSet(
 			mPlaneDescSetBuf[mFrameCount % 2], 10, 0, 1, vk::DescriptorType::eUniformBuffer
 		).setBufferInfo(descLightBufInfo);
-		mDevice->updateDescriptorSets(8, wdescSets, 0, nullptr);
+		wdescSets[9] = vk::WriteDescriptorSet(
+			mPlaneDescSetBuf[mFrameCount % 2], 11, 0, 1, vk::DescriptorType::eStorageBuffer
+		).setBufferInfo(descSHBufInfo);
+		mDevice->updateDescriptorSets(10, wdescSets, 0, nullptr);
 		cmdBuf.bindVertexBuffers(0, *mPlaneVB, { 0 });
 		cmdBuf.bindIndexBuffer(*mPlaneIB, 0, vk::IndexType::eUint16);
 		const auto planeDescSets = {
