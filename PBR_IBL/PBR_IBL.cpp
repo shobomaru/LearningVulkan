@@ -742,10 +742,8 @@ float4 main(Input input) : SV_Target {
 	lit += ApproximateSpecularIBL(specColor, input.roughness, input.normal, viewDir, envBrdf);
 	float3 sh[9];
 	readSH(sh);
-	float3 specReflectance = lerp(envBrdf.x * specColor, envBrdf.y, specColor);
+	float3 specReflectance = specColor;
 	lit += irradianceSH(input.normal, sh) * diffColor * (1 - specReflectance) * Fd_Lambert();
-	//lit += EnvDiffuseMap.SampleLevel(EnvMapSS, input.normal,0) * diffColor * (1 - specReflectance) * Fd_Lambert();
-//lit=specReflectance;
 	return float4(lit, 1.0);
 }
 )#";
@@ -757,6 +755,7 @@ float4 main(uint vid : SV_VertexID) : SV_Position {
 )#";
 
 		static const char shaderCodePostPS[] = R"#(
+// http://filmicworlds.com/blog/filmic-tonemapping-operators/
 [[vk::input_attachment_index(0)]] SubpassInput Input;
 float luminance(float3 rgb) {
 	return dot(rgb, float3(0.2, 0.7, 0.1));
@@ -1043,7 +1042,7 @@ void processProjectSH(float3 dir, float3 color, float fSize, uint2 idx) {
 	const float u = (float)idx.x * fS + fB;
 	const float fDiffSolid = 4 / ((1 + u * u + v * v) * sqrt(1 + u * u + v * v));
 	float basis[9];
-	SHNewEval3(dir.x, dir.y, dir.z, basis);
+	SHNewEval3(-dir.x, -dir.y, -dir.z, basis);
 	float tempR[9], tempG[9], tempB[9];
 	SHScale(basis, color.r * fDiffSolid, tempR);
 	SHScale(basis, color.g * fDiffSolid, tempG);
