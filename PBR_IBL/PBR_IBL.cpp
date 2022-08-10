@@ -640,7 +640,7 @@ static const float MaxEnvMapMipLevel = 7.0;
 [[vk::binding(0, 1)]] Texture2D BaseColor;
 [[vk::binding(1, 1)]] SamplerState SS;
 [[vk::binding(2, 1)]] TextureCube<float3> EnvMap;
-[[vk::binding(3, 1)]] TextureCube<float3> EnvDiffuseMap; // baked as SH
+//[[vk::binding(3, 1)]] TextureCube<float3> EnvDiffuseMap; // baked on SH
 [[vk::binding(4, 1)]] SamplerState EnvMapSS;
 [[vk::binding(5, 1)]] Texture2D<float2> AmbientBrdf;
 [[vk::binding(6, 1)]] SamplerState AmbientBrdfSS;
@@ -1035,23 +1035,23 @@ void writeSH(int r[9], int idx) {
 	}
 }
 void processProjectSH(float3 dir, float3 color, float fSize, uint2 idx) {
-	float fPicSize = 1 / fSize;
 	float fB = -1 + 1 / fSize;
 	float fS = 2 * (1 - 1 / fSize) / (fSize - 1);
-	const float v = (float)idx.y * fS + fB;
-	const float u = (float)idx.x * fS + fB;
-	const float fDiffSolid = 4 / ((1 + u * u + v * v) * sqrt(1 + u * u + v * v));
+	float v = (float)idx.y * fS + fB;
+	float u = (float)idx.x * fS + fB;
+	float fTmp = 1 + u * u + v * v;
+	float fWt = 4 / (sqrt(fTmp) * fTmp);
 	float basis[9];
 	SHNewEval3(-dir.x, -dir.y, -dir.z, basis);
 	float tempR[9], tempG[9], tempB[9];
-	SHScale(basis, color.r * fDiffSolid, tempR);
-	SHScale(basis, color.g * fDiffSolid, tempG);
-	SHScale(basis, color.b * fDiffSolid, tempB);
+	SHScale(basis, color.r * fWt, tempR);
+	SHScale(basis, color.g * fWt, tempG);
+	SHScale(basis, color.b * fWt, tempB);
 	int iTempR[9], iTempG[9], iTempB[9];
 	toFixedPoint(tempR, iTempR);
 	toFixedPoint(tempG, iTempG);
 	toFixedPoint(tempB, iTempB);
-	int iWt = toFixedPointWt(fDiffSolid);
+	int iWt = toFixedPointWt(fWt);
 	writeSH(iTempR, 0);
 	writeSH(iTempG, 1);
 	writeSH(iTempB, 2);
@@ -1081,7 +1081,8 @@ groupshared float sNorm;
 [numthreads(27, 1, 1)]
 void main(uint dtid : SV_DispatchThreadID) {
 	if (dtid == 0) {
-		sNorm = 4 * PI / fromFixedPointWt(InOut[27]);
+		float fWtSum = fromFixedPointWt(InOut[27]);
+		sNorm = 4 * PI / fWtSum; // area of sphere
 		InOut[27] = asuint(sNorm);
 	}
 	GroupMemoryBarrierWithGroupSync();
