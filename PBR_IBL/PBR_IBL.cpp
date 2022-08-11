@@ -729,6 +729,11 @@ float4 main(Input input) : SV_Target {
 	float dotNL = saturate(dot(input.normal, SunLightDirection));
 	float dotNH = saturate(dot(input.normal, halfVector));
 	float dotLH = saturate(dot(SunLightDirection, halfVector));
+	// https://ubm-twvideo01.s3.amazonaws.com/o1/vault/gdc2017/Presentations/Hammon_Earl_PBR_Diffuse_Lighting.pdf
+	float lenSq_LV = 2 + 2 * dot(SunLightDirection, viewDir);
+	float rcpLen_LV = rsqrt(lenSq_LV);
+	dotNH = (dotNL + dotNV) * rcpLen_LV;
+	dotLH = rcpLen_LV + rcpLen_LV * dot(SunLightDirection, viewDir);
 	float roughness = input.roughness * input.roughness;
 	float termD = D_GGX(dotNH, roughness);
 	float termV = V_SmithGGXCorrelated(dotNV, dotNL, roughness);
