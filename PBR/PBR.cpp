@@ -590,6 +590,7 @@ float4 main(uint vid : SV_VertexID) : SV_Position {
 )#";
 
 		static const char shaderCodePostPS[] = R"#(
+// http://filmicworlds.com/blog/filmic-tonemapping-operators/
 [[vk::input_attachment_index(0)]] SubpassInput Input;
 float luminance(float3 rgb) {
 	return dot(rgb, float3(0.2, 0.7, 0.1));
