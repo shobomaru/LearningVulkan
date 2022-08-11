@@ -703,7 +703,7 @@ float3 irradianceSH(float3 n, float3 sh[9]) {
 		+ sh[8] * (n.x * n.x - n.y * n.y)
 #endif
 		;
-	return max(0, c);
+	return max(0, c) / PI;
 }
 void readSH(out float3 sh[9]) {
 	sh[0] = float3(SHFactorBuf[0], SHFactorBuf[9], SHFactorBuf[18]);
