@@ -493,7 +493,7 @@ public:
 		static const char shaderCodeSceneVS[] = R"#(
 [[vk::binding(0, 0)]] cbuffer CScene {
 	float4x4 ViewProj;
-	float4x4 Model[1 + 12];
+	float4x4 Model[1 + 18];
 	float2 Metallic;
 	float2 Roughness;
 };
@@ -504,6 +504,7 @@ struct Output {
 	float2 texcoord : Texcoord;
 	float metallic : Metallic;
 	float roughness : Roughness;
+	float2 clearCoat : ClearCoat;
 };
 Output main(uint instanceID : SV_InstanceID, [[vk::builtin("BaseInstance")]] uint baseInstanceID : BaseInstanceID,
 			 float3 position : Position, float3 normal : Normal, float2 texcoord : Texcoord) {
@@ -513,8 +514,9 @@ Output main(uint instanceID : SV_InstanceID, [[vk::builtin("BaseInstance")]] uin
 	output.world = wpos.xyz / wpos.w;
 	output.normal = normalize(mul(normal, (float3x3)Model[instanceID + baseInstanceID]));
 	output.texcoord = texcoord;
-	output.metallic = lerp(Metallic[0], Metallic[1], (float)(instanceID / 6));
+	output.metallic = lerp(Metallic[0], Metallic[1], saturate((float)(instanceID / 6)));
 	output.roughness = lerp(Roughness[0], Roughness[1], (float)(instanceID % 6) / 5);
+	output.clearCoat = float2((instanceID >= 12 && instanceID < 18) ? 1 : 0, 0.2/*roughness*/);
 	return output;
 }
 )#";
@@ -534,6 +536,7 @@ struct Input {
 	float2 texcoord : Texcoord;
 	float metallic : Metallic;
 	float roughness : Roughness;
+	float2 clearCoat : ClearCoat;
 };
 // https://google.github.io/filament/Filament.html
 #define PI (3.14159265f)
@@ -557,6 +560,9 @@ float Fd_Burley(float NoV, float NoL, float LoH, float roughness) {
 	float lightScatter = F_Schlick(NoL, 1.0, f90).x;
 	float viewScatter = F_Schlick(NoV, 1.0, f90).x;
 	return lightScatter * viewScatter * (1.0 / PI);
+}
+float V_Kelemen(float LoH) {
+	return 0.25 / (LoH * LoH);
 }
 float4 main(Input input) : SV_Target {
 	float4 baseColor = Tex.Sample(SS, input.texcoord);
@@ -582,7 +588,16 @@ float4 main(Input input) : SV_Target {
 	float3 Fr = termD * termV * termF;
 	float Fd = Fd_Burley(dotNV, dotNL, dotLH, roughness);
 
-	float3 F = Fr + Fd * diffColor;
+	float clearCoatStrength = input.clearCoat.x;
+	float clearCoatPerceptualRoughness = input.clearCoat.y;
+	float clearCoatRoughness = clearCoatPerceptualRoughness * clearCoatPerceptualRoughness;
+	float termDc = D_GGX(dotNH, clearCoatRoughness);
+	float termVc = V_Kelemen(dotLH);
+	float termFc = F_Schlick(dotLH, 0.04).r * clearCoatStrength;
+	float Frc = termDc * termVc * termFc;
+
+	//float3 F = Fr + Fd * diffColor; // Diffuse + Specular
+	float3 F = (Fr + Fd * diffColor) * (1 - termFc) + Frc.rrr;
 	float3 lit = SunLightIntensity * F * dotNL;
 	return float4(lit, 1.0);
 }
@@ -1170,12 +1185,12 @@ float4 main() : SV_Target {
 		struct CBuffer
 		{
 			DirectX::XMMATRIX ViewProj;
-			DirectX::XMMATRIX Model[1 + 12];
+			DirectX::XMMATRIX Model[1 + 18];
 			DirectX::XMVECTOR Metallic_Roughness;
 		} cbufBuf;
 		cbufBuf.ViewProj = vpMat;
 		cbufBuf.Model[0] = DirectX::XMMatrixIdentity();
-		for (int i = 0; i < 12; ++i)
+		for (int i = 0; i < 18; ++i)
 		{
 			float x = (float)(i % 6) * 1.1f - 3.3f + 0.65f;
 			float y = (float)(i / 6) * 1.1f + 1.f;
@@ -1289,7 +1304,7 @@ float4 main() : SV_Target {
 		cmdBuf.bindDescriptorSets(
 			vk::PipelineBindPoint::eGraphics, *mPipelineLayout, 0, sphereDescSets, {}
 		);
-		cmdBuf.drawIndexed(6 * SphereStacks * SphereSlices, 12, 0, 0, 1);
+		cmdBuf.drawIndexed(6 * SphereStacks * SphereSlices, 18, 0, 0, 1);
 
 		// Draw a plane
 		if (!(mPlaneDescSetBuf[mFrameCount % 2]))
