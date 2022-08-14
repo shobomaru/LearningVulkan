@@ -516,7 +516,7 @@ Output main(uint instanceID : SV_InstanceID, [[vk::builtin("BaseInstance")]] uin
 	output.texcoord = texcoord;
 	output.metallic = lerp(Metallic[0], Metallic[1], saturate((float)(instanceID / 6)));
 	output.roughness = lerp(Roughness[0], Roughness[1], (float)(instanceID % 6) / 5);
-	output.clearCoat = float2((instanceID >= 12 && instanceID < 18) ? 1 : 0, 0.2/*roughness*/);
+	output.clearCoat = float2((instanceID >= 12 && instanceID < 18) ? 1 : 0, 0.1/*roughness*/);
 	return output;
 }
 )#";
