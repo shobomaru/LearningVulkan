@@ -1,4 +1,4 @@
-// based on SimpleDraw.cpp
+// based on SimpleSphere.cpp
 
 #define _WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -105,13 +105,12 @@ class VLK
 	static constexpr int SphereSlices = 12;
 	static constexpr int SphereStacks = 12;
 
-	vk::UniqueBuffer mSphereVBIB;
-	vk::UniqueDeviceMemory mSphereMemory;
-	vk::DeviceSize mSpherePointer;
+	vk::UniqueBuffer mVBIB;
+	vk::UniqueDeviceMemory mVBIBMemory;
+	vk::DeviceSize mVBIBPointer;
+	vk::DeviceSize mSphereVBOffset;
 	vk::DeviceSize mSphereIBOffset;
-	vk::UniqueBuffer mPlaneVBIB;
-	vk::UniqueDeviceMemory mPlaneMemory;
-	vk::DeviceSize mPlanePointer;
+	vk::DeviceSize mPlaneVBOffset;
 	vk::DeviceSize mPlaneIBOffset;
 
 	static constexpr int UniformBufferSize = 1 * 1000 * 1000;
@@ -173,8 +172,8 @@ public:
 			for (auto& layer : layers)
 			{
 				ASSERT(find_if(begin(supportedLayers), end(supportedLayers),
-						[&](const vk::LayerProperties& s) { return string_view(s.layerName) == layer; }
-					) != end(supportedLayers), "Layer not available");
+					[&](const vk::LayerProperties& s) { return string_view(s.layerName) == layer; }
+				) != end(supportedLayers), "Layer not available");
 			}
 		}
 #endif
@@ -182,8 +181,8 @@ public:
 		{
 			const auto supportedExts = vk::enumerateInstanceExtensionProperties();
 			ASSERT(find_if(begin(supportedExts), end(supportedExts),
-					[&](const vk::ExtensionProperties& s) { return string_view(s.extensionName) == ext; }
-				) != end(supportedExts), "Extension not available");
+				[&](const vk::ExtensionProperties& s) { return string_view(s.extensionName) == ext; }
+			) != end(supportedExts), "Extension not available");
 		}
 
 		// Set debug util
@@ -239,9 +238,15 @@ public:
 		{
 			const auto supportedExts = physDevice.enumerateDeviceExtensionProperties();
 			ASSERT(find_if(begin(supportedExts), end(supportedExts),
-					[&](const vk::ExtensionProperties& s) { return string_view(s.extensionName) == ext; }
-				) != end(supportedExts), "Extension not available");
+				[&](const vk::ExtensionProperties& s) { return string_view(s.extensionName) == ext; }
+			) != end(supportedExts), "Extension not available");
 		}
+
+		// Check device features
+		const auto features = physDevice.getFeatures();
+		const auto props = physDevice.getProperties();
+		cout << "Device Name: " << props.deviceName << endl;
+		ASSERT(features.shaderInt64, "Int64 is not supported");
 
 		// Create a device
 		float queueGfxPriority = 1.0f;
@@ -249,11 +254,14 @@ public:
 			{{}, queueGfxIdx, 1, &queueGfxPriority},
 		};
 		// VK_KHR_buffer_device_address
-		auto enableBufferDeviceAddress = vk::PhysicalDeviceBufferDeviceAddressFeatures(1, 1);
+		auto enableBufferDeviceAddress = vk::PhysicalDeviceBufferDeviceAddressFeatures(1, 0);
+		const auto enableFeatures = vk::PhysicalDeviceFeatures().setShaderInt64(1);
+		const auto enableFeatures2 = vk::PhysicalDeviceFeatures2(enableFeatures)
+			.setPNext(&enableBufferDeviceAddress);
 		const auto deviceCreateInfo = vk::DeviceCreateInfo(
 			{}, _countof(deviceQueueInfo), deviceQueueInfo,
 			0, nullptr, _countof(deviceExtensions), deviceExtensions
-		).setPNext(&enableBufferDeviceAddress);
+		).setPNext(&enableFeatures2);
 		mDevice = physDevice.createDeviceUnique(deviceCreateInfo);
 
 		// Get device queues
@@ -265,11 +273,11 @@ public:
 		const auto surfaceColorSpace = vk::ColorSpaceKHR::eSrgbNonlinear;
 		const auto supportedSurfaceFormats = physDevice.getSurfaceFormatsKHR(*mSurface);
 		ASSERT(find_if(supportedSurfaceFormats.begin(),
-				supportedSurfaceFormats.end(),
-				[&](vk::SurfaceFormatKHR s) {
-					return s.format == surfaceFormat && s.colorSpace == surfaceColorSpace;
-				}
-			) != supportedSurfaceFormats.end() , "Surface format mismatch");
+			supportedSurfaceFormats.end(),
+			[&](vk::SurfaceFormatKHR s) {
+				return s.format == surfaceFormat && s.colorSpace == surfaceColorSpace;
+			}
+		) != supportedSurfaceFormats.end(), "Surface format mismatch");
 
 		// Create a swapchain
 		const auto surfaceCaps = physDevice.getSurfaceCapabilitiesKHR(*mSurface);
@@ -278,7 +286,7 @@ public:
 		const auto presentMode = vk::PresentModeKHR::eFifo;
 		const auto surfacePresentModes = physDevice.getSurfacePresentModesKHR(*mSurface);
 		ASSERT(find(surfacePresentModes.begin(), surfacePresentModes.end(), presentMode)
-				!= surfacePresentModes.end(), "Unsupported presentation mode");
+			!= surfacePresentModes.end(), "Unsupported presentation mode");
 		const auto swapChainCreateInfo = vk::SwapchainCreateInfoKHR(
 			{}, *mSurface, BUFFER_COUNT, surfaceFormat, surfaceColorSpace,
 			vk::Extent2D(width, height), 1,
@@ -359,8 +367,9 @@ public:
 		mDescriptorSetLayout = mDevice->createDescriptorSetLayoutUnique(descriptorSetLayoutInfo);
 
 		// Create a pipeline layout
+		const auto pipelinePushConsts = vk::PushConstantRange(vk::ShaderStageFlagBits::eVertex, 0, 8);
 		mPipelineLayout = mDevice->createPipelineLayoutUnique(
-			vk::PipelineLayoutCreateInfo({}, *mDescriptorSetLayout)
+			vk::PipelineLayoutCreateInfo({}, *mDescriptorSetLayout, pipelinePushConsts)
 		);
 
 		// Create modules
@@ -368,12 +377,18 @@ public:
 [[vk::binding(0, 0)]] cbuffer CScene {
 	float4x4 ViewProj;
 };
+struct PushConst {
+	uint64_t VBPointer;
+};
+[[vk::push_constant]] PushConst pushConst; 
 struct Output {
 	float4 position : SV_Position;
 	float3 world : WorldPosition;
 	float3 normal : Normal;
 };
-Output main(float3 position : Position, float3 normal : Normal) {
+Output main(uint vid : SV_VertexID) {
+	float3 position = vk::RawBufferLoad<float3>(pushConst.VBPointer + 24 * vid);
+	float3 normal = vk::RawBufferLoad<float3>(pushConst.VBPointer + 24 * vid + 12);
 	Output output;
 	output.position = mul(float4(position, 1), ViewProj);
 	output.world = position;
@@ -432,7 +447,7 @@ float4 main(Input input) : SV_Target {
 
 		const auto vsCreateInfo = vk::ShaderModuleCreateInfo(
 			{}, dxcBlobSceneVS->GetBufferSize(), reinterpret_cast<uint32_t*>(dxcBlobSceneVS->GetBufferPointer()));
-		auto vsModule =  mDevice->createShaderModuleUnique(vsCreateInfo);
+		auto vsModule = mDevice->createShaderModuleUnique(vsCreateInfo);
 		const auto psCreateInfo = vk::ShaderModuleCreateInfo(
 			{}, dxcBlobScenePS->GetBufferSize(), reinterpret_cast<uint32_t*>(dxcBlobScenePS->GetBufferPointer()));
 		auto fsModule = mDevice->createShaderModuleUnique(psCreateInfo);
@@ -442,14 +457,8 @@ float4 main(Input input) : SV_Target {
 			vk::PipelineShaderStageCreateInfo({}, vk::ShaderStageFlagBits::eVertex, *vsModule, "main"),
 			vk::PipelineShaderStageCreateInfo({}, vk::ShaderStageFlagBits::eFragment, *fsModule, "main"),
 		};
-		const auto vertexInputBindingDesc
-			= vk::VertexInputBindingDescription(0, 24, vk::VertexInputRate::eVertex);
-		const auto vertexInputAttrsDesc = {
-			vk::VertexInputAttributeDescription(0, 0, vk::Format::eR32G32B32Sfloat, 0),
-			vk::VertexInputAttributeDescription(1, 0, vk::Format::eR32G32B32Sfloat, 12),
-		};
 		const auto pipelineVertexInputsInfo = vk::PipelineVertexInputStateCreateInfo(
-			{}, vertexInputBindingDesc, vertexInputAttrsDesc
+			{}, {}, {}
 		);
 		const auto pipelineInputAssemblyStateInfo = vk::PipelineInputAssemblyStateCreateInfo(
 			{}, vk::PrimitiveTopology::eTriangleList
@@ -585,24 +594,30 @@ float4 main(Input input) : SV_Target {
 		}
 
 		// Create sphere buffers
-		mSphereVBIB = mDevice->createBufferUnique(vk::BufferCreateInfo(
-			{}, sizeof(vertices[0]) * vertices.size() + sizeof(indices[0]) * indices.size(),
+		mVBIB = mDevice->createBufferUnique(vk::BufferCreateInfo(
+			{}, 4 * 1024 * 1024,
 			vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eIndexBuffer
+			| vk::BufferUsageFlagBits::eShaderDeviceAddress
 		));
-		const auto sphereVBIBMemReq = mDevice->getBufferMemoryRequirements(*mSphereVBIB);
-		const auto sphereBDAInfo = vk::BufferDeviceAddressInfo(*mSphereVBIB);
-		mSphereMemory = mDevice->allocateMemoryUnique(vk::MemoryAllocateInfo(
-			sphereVBIBMemReq.size, GetMemTypeIndex(sphereVBIBMemReq, true)
-		).setPNext(&sphereBDAInfo));
-		mDevice->bindBufferMemory(*mSphereVBIB, *mSphereMemory, 0);
+		const auto VBIBAllocFlagsInfo = vk::MemoryAllocateFlagsInfo(
+			vk::MemoryAllocateFlagBits::eDeviceAddress
+		);
+		const auto VBIBMemReq = mDevice->getBufferMemoryRequirements(*mVBIB);
+		mVBIBMemory = mDevice->allocateMemoryUnique(vk::MemoryAllocateInfo(
+			VBIBMemReq.size, GetMemTypeIndex(VBIBMemReq, true)
+		).setPNext(&VBIBAllocFlagsInfo));
+		mDevice->bindBufferMemory(*mVBIB, *mVBIBMemory, 0);
+		mVBIBPointer = mDevice->getBufferAddress(vk::BufferDeviceAddressInfo(*mVBIB));
+		mSphereVBOffset = 0;
 		mSphereIBOffset = sizeof(vertices[0]) * vertices.size();
 
 		// Upload sphere data
-		uint8_t *pData = reinterpret_cast<uint8_t*>(mDevice->mapMemory(*mSphereMemory, 0, VK_WHOLE_SIZE));
+		uint8_t *pData = reinterpret_cast<uint8_t*>(mDevice->mapMemory(*mVBIBMemory, 0, VK_WHOLE_SIZE));
 		memcpy(pData, vertices.data(), sizeof(vertices[0])* vertices.size());
-		pData += mSphereIBOffset;
-		memcpy(pData, indices.data(), sizeof(indices[0])* indices.size());
-		mDevice->unmapMemory(*mSphereMemory);
+		memcpy(pData + mSphereIBOffset, indices.data(), sizeof(indices[0])* indices.size());
+		mDevice->unmapMemory(*mVBIBMemory);
+
+		mPlaneVBOffset = mSphereIBOffset + sizeof(indices[0]) * indices.size();
 
 		// Generate a plane
 		vertices.clear();
@@ -615,24 +630,13 @@ float4 main(Input input) : SV_Target {
 		indices.push_back({ 0, 1, 2, 2, 1, 3 });
 
 		// Create plane buffers
-		mPlaneVBIB = mDevice->createBufferUnique(vk::BufferCreateInfo(
-			{}, sizeof(vertices[0]) * vertices.size() + sizeof(indices[0]) * indices.size(),
-			vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eIndexBuffer
-		));
-		const auto planeVBIBMemReq = mDevice->getBufferMemoryRequirements(*mPlaneVBIB);
-		const auto planeBDAInfo = vk::BufferDeviceAddressInfo(*mPlaneVBIB);
-		mPlaneMemory = mDevice->allocateMemoryUnique(vk::MemoryAllocateInfo(
-			planeVBIBMemReq.size, GetMemTypeIndex(planeVBIBMemReq, true)
-		).setPNext(&planeBDAInfo));
-		mDevice->bindBufferMemory(*mPlaneVBIB, *mPlaneMemory, 0);
-		mPlaneIBOffset = sizeof(vertices[0]) * vertices.size();
+		mPlaneIBOffset = mPlaneVBOffset + sizeof(vertices[0]) * vertices.size();
 
 		// Upload plane data
-		pData = reinterpret_cast<uint8_t*>(mDevice->mapMemory(*mPlaneMemory, 0, VK_WHOLE_SIZE));
-		memcpy(pData, vertices.data(), sizeof(vertices[0])* vertices.size());
-		pData += mPlaneIBOffset;
-		memcpy(pData, indices.data(), sizeof(indices[0])* indices.size());
-		mDevice->unmapMemory(*mPlaneMemory);
+		pData = reinterpret_cast<uint8_t*>(mDevice->mapMemory(*mVBIBMemory, 0, VK_WHOLE_SIZE));
+		memcpy(pData + mPlaneVBOffset, vertices.data(), sizeof(vertices[0])* vertices.size());
+		memcpy(pData + mPlaneIBOffset, indices.data(), sizeof(indices[0])* indices.size());
+		mDevice->unmapMemory(*mVBIBMemory);
 
 		// Create uniform buffers
 		for (auto& ub : mUniformBuffers)
@@ -719,11 +723,12 @@ float4 main(Input input) : SV_Target {
 		vk::Rect2D scissor({}, mSceneExtent);
 		cmdBuf.setScissor(0, scissor);
 		cmdBuf.bindPipeline(vk::PipelineBindPoint::eGraphics, *mPSO);
-		cmdBuf.bindVertexBuffers(0, *mSphereVBIB, { 0 });
-		cmdBuf.bindIndexBuffer(*mSphereVBIB, mSphereIBOffset, vk::IndexType::eUint16);
+		cmdBuf.bindIndexBuffer(*mVBIB, mSphereIBOffset, vk::IndexType::eUint16);
 		cmdBuf.bindDescriptorSets(
 			vk::PipelineBindPoint::eGraphics, *mPipelineLayout, 0, mSphereDescSet[mFrameCount % 2], {}
 		);
+		const auto sphereVBPointer = mVBIBPointer + mSphereVBOffset;
+		cmdBuf.pushConstants(*mPipelineLayout, vk::ShaderStageFlagBits::eVertex, 0, 8, &sphereVBPointer);
 		cmdBuf.drawIndexed(6 * SphereStacks * SphereSlices, 1, 0, 0, 0);
 
 		// Draw a plane
@@ -739,11 +744,12 @@ float4 main(Input input) : SV_Target {
 			mPlaneDescSet[mFrameCount % 2], 0, 0, 1, vk::DescriptorType::eUniformBuffer
 		).setBufferInfo(descBufInfo);
 		mDevice->updateDescriptorSets(1, wdescSets, 0, nullptr);
-		cmdBuf.bindVertexBuffers(0, *mPlaneVBIB, { 0 });
-		cmdBuf.bindIndexBuffer(*mPlaneVBIB, mPlaneIBOffset, vk::IndexType::eUint16);
+		cmdBuf.bindIndexBuffer(*mVBIB, mPlaneIBOffset, vk::IndexType::eUint16);
 		cmdBuf.bindDescriptorSets(
 			vk::PipelineBindPoint::eGraphics, *mPipelineLayout, 0, mPlaneDescSet[mFrameCount % 2], {}
 		);
+		const auto planeVBPointer = mVBIBPointer + mPlaneVBOffset;
+		cmdBuf.pushConstants(*mPipelineLayout, vk::ShaderStageFlagBits::eVertex, 0, 8, &planeVBPointer);
 		cmdBuf.drawIndexed(6, 1, 0, 0, 0);
 
 		cmdBuf.endRenderPass();
