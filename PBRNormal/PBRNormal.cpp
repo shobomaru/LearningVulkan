@@ -469,6 +469,9 @@ public:
 				vk::DescriptorSetLayoutBinding(
 					1, vk::DescriptorType::eSampler, 1, vk::ShaderStageFlagBits::eFragment
 				),
+				vk::DescriptorSetLayoutBinding(
+					2, vk::DescriptorType::eSampledImage, 1, vk::ShaderStageFlagBits::eFragment
+				),
 			};
 			const auto descriptorSetLayoutInfo = vk::DescriptorSetLayoutCreateInfo(
 				{}, descriptorBinding
@@ -497,6 +500,7 @@ public:
 		static const char shaderCodeSceneVS[] = R"#(
 [[vk::binding(0, 0)]] cbuffer CScene {
 	float4x4 ViewProj;
+	float4x4 View;
 	float4x4 Model[1 + 18];
 	float2 Metallic;
 	float2 Roughness;
@@ -506,6 +510,7 @@ struct Output {
 	float3 world : WorldPosition;
 	float3 normal : Normal;
 	float3 tangent : Tangent;
+	float3 bitangent : Bitangent;
 	float2 texcoord : Texcoord;
 	float metallic : Metallic;
 	float roughness : Roughness;
@@ -523,6 +528,12 @@ Output main(uint instanceID : SV_InstanceID, [[vk::builtin("BaseInstance")]] uin
 	output.metallic = lerp(Metallic[0], Metallic[1], saturate((float)(instanceID / 6)));
 	output.roughness = lerp(Roughness[0], Roughness[1], (float)(instanceID % 6) / 5);
 	output.clearCoat = float2((instanceID >= 12 && instanceID < 18) ? 1 : 0, 0.1/*roughness*/);
+
+	output.normal = mul(output.normal, (float3x3)View);
+	output.tangent = mul(output.tangent, (float3x3)View);
+	// Gram-Schmidt re-orthogonalize
+	//output.tangent = normalize(output.tangent - dot(output.tangent, output.normal) * output.normal);
+	output.bitangent = cross(output.normal, output.tangent);
 	return output;
 }
 )#";
@@ -535,11 +546,13 @@ Output main(uint instanceID : SV_InstanceID, [[vk::builtin("BaseInstance")]] uin
 };
 [[vk::binding(0, 1)]] Texture2D Tex;
 [[vk::binding(1, 1)]] SamplerState SS;
+[[vk::binding(2, 1)]] Texture2D NormalMap;
 struct Input {
 	float4 position : SV_Position;
 	float3 world : WorldPosition;
 	float3 normal : Normal;
 	float3 tangent : Tangent;
+	float3 bitangent : Bitangent;
 	float2 texcoord : Texcoord;
 	float metallic : Metallic;
 	float roughness : Roughness;
@@ -575,13 +588,20 @@ float4 main(Input input) : SV_Target {
 	float4 baseColor = Tex.Sample(SS, input.texcoord);
 	float3 diffColor = (input.metallic > 0.0) ? 0.0 : baseColor.rgb;
 	float3 specColor = (input.metallic > 0.0) ? baseColor.rgb : F0.xxx;
+
 	input.normal = normalize(input.normal);
+	input.tangent = normalize(input.tangent);
+	input.bitangent = normalize(input.bitangent);
+	float3x3 TBN = { input.tangent, input.bitangent, input.normal };
+	float3 normal = normalize(NormalMap.Sample(SS, input.texcoord).rgb * 2 - 1);
+//normal = float3(0,0,1);
+	normal = mul(normal, TBN);
 
 	float3 viewDir = normalize(CameraPosition - input.world);
 	float3 halfVector = normalize(viewDir + SunLightDirection);
-	float dotNV = abs(dot(input.normal, viewDir)) + 1e-5;
-	float dotNL = saturate(dot(input.normal, SunLightDirection));
-	float dotNH = saturate(dot(input.normal, halfVector));
+	float dotNV = abs(dot(normal, viewDir)) + 1e-5;
+	float dotNL = saturate(dot(normal, SunLightDirection));
+	float dotNH = saturate(dot(normal, halfVector));
 	float dotLH = saturate(dot(SunLightDirection, halfVector));
 	// https://ubm-twvideo01.s3.amazonaws.com/o1/vault/gdc2017/Presentations/Hammon_Earl_PBR_Diffuse_Lighting.pdf
 	float lenSq_LV = 2 + 2 * dot(SunLightDirection, viewDir);
@@ -606,7 +626,7 @@ float4 main(Input input) : SV_Target {
 	//float3 F = Fr + Fd * diffColor; // Diffuse + Specular
 	float3 F = (Fr + Fd * diffColor) * (1 - termFc) + Frc.rrr;
 	float3 lit = SunLightIntensity * F * dotNL;
-return float4(normalize(input.tangent)*0.5+0.5    +0.00000001*lit,1);
+//return float4(normalize(input.tangent)*0.5+0.5    +0.00000001*lit,1);
 	return float4(lit, 1.0);
 }
 )#";
@@ -1170,7 +1190,7 @@ float4 main() : SV_Target {
 			{}, *mLennaImg, vk::ImageViewType::e2D, vk::Format::eR8G8B8A8Unorm, {},
 			vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, mLennaMipLevels, 0, 1)
 		));
-		mLennaView = mDevice->createImageViewUnique(vk::ImageViewCreateInfo(
+		mNormalView = mDevice->createImageViewUnique(vk::ImageViewCreateInfo(
 			{}, *mNormalImg, vk::ImageViewType::e2D, vk::Format::eR8G8B8A8Unorm, {},
 			vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, mNormalMipLevels, 0, 1)
 		));
@@ -1306,10 +1326,12 @@ float4 main() : SV_Target {
 		struct CBuffer
 		{
 			DirectX::XMMATRIX ViewProj;
+			DirectX::XMMATRIX View;
 			DirectX::XMMATRIX Model[1 + 18];
 			DirectX::XMVECTOR Metallic_Roughness;
 		} cbufBuf;
 		cbufBuf.ViewProj = vpMat;
+		cbufBuf.View = DirectX::XMMatrixTranspose(viewMat);
 		cbufBuf.Model[0] = DirectX::XMMatrixIdentity();
 		for (int i = 0; i < 18; ++i)
 		{
@@ -1406,6 +1428,7 @@ float4 main() : SV_Target {
 		auto descLightBufInfo = vk::DescriptorBufferInfo(*mUniformBuffers[mFrameCount % 2], 2048, 2048);
 		auto descTexInfo = vk::DescriptorImageInfo({}, *mSailboatView, vk::ImageLayout::eShaderReadOnlyOptimal);
 		auto descSamplerInfo = vk::DescriptorImageInfo(*mSampler, {}, {});
+		auto descNormalMapInfo = vk::DescriptorImageInfo({}, *mNormalView, vk::ImageLayout::eShaderReadOnlyOptimal);
 		wdescSets[0] = vk::WriteDescriptorSet(
 			mSphereDescSetBuf[mFrameCount % 2], 0, 0, 1, vk::DescriptorType::eUniformBuffer
 			).setBufferInfo(descBufInfo);
@@ -1418,7 +1441,10 @@ float4 main() : SV_Target {
 		wdescSets[3] = vk::WriteDescriptorSet(
 			mSphereDescSetBuf[mFrameCount % 2], 10, 0, 1, vk::DescriptorType::eUniformBuffer
 		).setBufferInfo(descLightBufInfo);
-		mDevice->updateDescriptorSets(4, wdescSets, 0, nullptr);
+		wdescSets[4] = vk::WriteDescriptorSet(
+			mSphereDescSetTex[mFrameCount % 2], 2, 0, 1, vk::DescriptorType::eSampledImage
+		).setImageInfo(descNormalMapInfo);
+		mDevice->updateDescriptorSets(5, wdescSets, 0, nullptr);
 		cmdBuf.setViewport(0, vk::Viewport(0, 0, (float)mSceneExtent.width, (float)mSceneExtent.height, 0, 1));
 		vk::Rect2D scissor({}, mSceneExtent);
 		cmdBuf.setScissor(0, scissor);
@@ -1447,6 +1473,7 @@ float4 main() : SV_Target {
 		descLightBufInfo = vk::DescriptorBufferInfo(*mUniformBuffers[mFrameCount % 2], 2048, 2048);
 		descTexInfo = vk::DescriptorImageInfo({}, *mLennaView, vk::ImageLayout::eShaderReadOnlyOptimal);
 		descSamplerInfo = vk::DescriptorImageInfo(*mSampler, {}, {});
+		descNormalMapInfo = vk::DescriptorImageInfo({}, *mNormalView, vk::ImageLayout::eShaderReadOnlyOptimal);
 		wdescSets[0] = vk::WriteDescriptorSet(
 			mPlaneDescSetBuf[mFrameCount % 2], 0, 0, 1, vk::DescriptorType::eUniformBuffer
 		).setBufferInfo(descBufInfo);
@@ -1459,7 +1486,10 @@ float4 main() : SV_Target {
 		wdescSets[3] = vk::WriteDescriptorSet(
 			mPlaneDescSetBuf[mFrameCount % 2], 10, 0, 1, vk::DescriptorType::eUniformBuffer
 		).setBufferInfo(descLightBufInfo);
-		mDevice->updateDescriptorSets(4, wdescSets, 0, nullptr);
+		wdescSets[4] = vk::WriteDescriptorSet(
+			mPlaneDescSetTex[mFrameCount % 2], 2, 0, 1, vk::DescriptorType::eSampledImage
+		).setImageInfo(descNormalMapInfo);
+		mDevice->updateDescriptorSets(5, wdescSets, 0, nullptr);
 		cmdBuf.bindVertexBuffers(0, *mPlaneVB, { 0 });
 		cmdBuf.bindIndexBuffer(*mPlaneIB, 0, vk::IndexType::eUint16);
 		const auto planeDescSets = {
