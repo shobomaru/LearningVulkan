@@ -974,6 +974,60 @@ float4 main() : SV_Target {
 			DirectX::XMStoreFloat3(&p, t);
 			v.tangent[0] = p.x; v.tangent[1] = p.y; v.tangent[2] = p.z;
 		}
+#if 1
+		vector<short> mergedCount;
+		mergedCount.resize(vertices.size());
+		auto IsAlmostSame = [](const float a[3], const float b[3], float diff) {
+			if ((fabs(a[0] - b[0]) < diff)
+				&& (fabs(a[1] - b[1]) < diff)
+				&& (fabs(a[2] - b[2]) < diff))
+				return true;
+			return false;
+		};
+		for (int i = 0; i < vertices.size(); ++i)
+		{
+			auto& vd = vertices[i];
+			for (int j = 0; j < (i - 1); ++j)
+			{
+				auto& vs = vertices[j];
+				if (IsAlmostSame(vs.position, vd.position, 0.0001f)
+					&& IsAlmostSame(vs.tangent, vd.tangent, 0.5f))
+				{
+					vs.normal[0] += vd.normal[0];
+					vs.normal[1] += vd.normal[1];
+					vs.normal[2] += vd.normal[2];
+					vs.tangent[0] += vd.tangent[0];
+					vs.tangent[1] += vd.tangent[1];
+					vs.tangent[2] += vd.tangent[2];
+					mergedCount[j]++;
+					for (auto& x : indices)
+					{
+						for (auto& y : x.a)
+						{
+							if (y == i)
+								y = j;
+						}
+					}
+					vd.position[0] = std::nanf(""); // debug
+					break;
+				}
+			}
+		}
+		for (int i = 0; i < vertices.size(); ++i)
+		{
+			int c = mergedCount[i] + 1;
+			if (c > 1)
+			{
+				auto& vs = vertices[i];
+				vs.normal[0] /= c;
+				vs.normal[1] /= c;
+				vs.normal[2] /= c;
+				vs.tangent[0] /= c;
+				vs.tangent[1] /= c;
+				vs.tangent[2] /= c;
+			}
+		}
+#endif
 #endif
 
 		// Create sphere buffers
@@ -1166,14 +1220,14 @@ float4 main() : SV_Target {
 		const auto lennaMemReq = mDevice->getImageMemoryRequirements(*mLennaImg);
 		mNormalImg = mDevice->createImageUnique(vk::ImageCreateInfo(
 			{}, vk::ImageType::e2D, vk::Format::eR8G8B8A8Unorm, normalData[0].extent,
-			mLennaMipLevels, 1, vk::SampleCountFlagBits::e1, vk::ImageTiling::eOptimal,
+			mNormalMipLevels, 1, vk::SampleCountFlagBits::e1, vk::ImageTiling::eOptimal,
 			vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
 			vk::SharingMode::eExclusive, {}, vk::ImageLayout::eUndefined
 		));
 		const auto normalMemReq = mDevice->getImageMemoryRequirements(*mNormalImg);
 		mImagesMemory = mDevice->allocateMemoryUnique(vk::MemoryAllocateInfo(
 			ALIGN(ALIGN(sailboatMemReq.size, lennaMemReq.alignment)
-				+ lennaMemReq.size, lennaMemReq.alignment)
+				+ lennaMemReq.size, normalMemReq.alignment)
 				+ normalMemReq.size,
 			GetMemTypeIndex(sailboatMemReq, false)
 		));
@@ -1206,6 +1260,11 @@ float4 main() : SV_Target {
 		{
 			memcpy(pData, lennaData[i].data.get(), lennaData[i].size);
 			pData += lennaData[i].size;
+		}
+		for (int i = 0; i < normalData.size(); ++i)
+		{
+			memcpy(pData, normalData[i].data.get(), normalData[i].size);
+			pData += normalData[i].size;
 		}
 		mDevice->unmapMemory(*mImageUploadMemory);
 
