@@ -938,9 +938,10 @@ float4 main() : SV_Target {
 				indices.push_back(il);
 				// http://www.opengl-tutorial.org/intermediate-tutorials/tutorial-13-normal-mapping/
 				float deltaPos1[3], deltaPos2[3], deltaUV1[2], deltaUV2[2];
+				// Pick a non-degenerated triangle, then calcurate tangent vector
 				if (fabs(v1.position[0] - v0.position[0]) > 0.0001f
-					|| fabs(v1.position[1] - v0.position[1]) > 0.0001f
-					|| fabs(v1.position[2] - v0.position[2]) > 0.0001f) {
+					&& fabs(v1.position[1] - v0.position[1]) > 0.0001f
+					&& fabs(v1.position[2] - v0.position[2]) > 0.0001f) {
 					sub_v3(v2.position, v0.position, deltaPos1);
 					sub_v3(v1.position, v0.position, deltaPos2);
 					sub_v2(v2.texcoord, v0.texcoord, deltaUV1);
