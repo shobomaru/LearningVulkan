@@ -869,38 +869,6 @@ float4 main() : SV_Target {
 		};
 		vector<VertexElement> vertices;
 		vector<IndexList> indices;
-		vertices.reserve((SphereStacks + 1)* (SphereSlices + 1));
-		for (int y = 0; y < SphereStacks + 1; ++y)
-		{
-			for (int x = 0; x < SphereSlices + 1; ++x)
-			{
-				float v[3] = { (float)x / (float)(SphereSlices), (float)y / (float)(SphereStacks), 0.0f };
-				float theta = 2 * 3.14159265f * v[0];
-				float phi = 2 * 3.14159265f * v[1] / 2.0f;
-				VertexElement ve = { sinf(phi) * sinf(theta), cosf(phi), sinf(phi) * cosf(theta) };
-				float r = 1.0f;
-				ve.normal[0] = ve.position[0] / r;
-				ve.normal[1] = ve.position[1] / r;
-				ve.normal[2] = ve.position[2] / r;
-				ve.texcoord[0] = (float)x / SphereSlices;
-				ve.texcoord[1] = (float)y / SphereStacks;
-				vertices.push_back(ve);
-			}
-		}
-		indices.reserve(SphereStacks * SphereSlices);
-		for (int y = 0; y < SphereStacks; ++y)
-		{
-			for (int x = 0; x < SphereSlices; ++x)
-			{
-				short b = static_cast<short>(y * (SphereSlices + 1) + x);
-				short s = SphereSlices + 1;
-				IndexList il = { b, b + s, b + 1, b + s, b + s + 1, b + 1 };
-				indices.push_back(il);
-			}
-		}
-#if 1
-		vertices.clear();
-		indices.clear();
 		vertices.reserve(SphereStacks * SphereSlices * 4);
 		indices.reserve(SphereStacks * SphereSlices);
 		for (int y = 0; y < SphereStacks; ++y)
@@ -975,7 +943,8 @@ float4 main() : SV_Target {
 			DirectX::XMStoreFloat3(&p, t);
 			v.tangent[0] = p.x; v.tangent[1] = p.y; v.tangent[2] = p.z;
 		}
-#if 1
+
+		// Merge same vertices to enable smooth shading
 		vector<short> mergedCount;
 		mergedCount.resize(vertices.size());
 		auto IsAlmostSame = [](const float a[3], const float b[3], float diff) {
@@ -1009,11 +978,12 @@ float4 main() : SV_Target {
 								y = j;
 						}
 					}
-					vd.position[0] = std::nanf(""); // debug
+					vd.position[0] = std::nanf(""); // debug, do not read
 					break;
 				}
 			}
 		}
+		// Normalize the vectors
 		for (int i = 0; i < vertices.size(); ++i)
 		{
 			int c = mergedCount[i] + 1;
@@ -1028,8 +998,6 @@ float4 main() : SV_Target {
 				vs.tangent[2] /= c;
 			}
 		}
-#endif
-#endif
 
 		// Create sphere buffers
 		mSphereVB = mDevice->createBufferUnique(vk::BufferCreateInfo(
@@ -1057,10 +1025,10 @@ float4 main() : SV_Target {
 		// Generate a plane
 		vertices.clear();
 		indices.clear();
-		vertices.push_back({ -1, -1, +1,  0, +1,  0,  0,  0, +1, 0, 0 });
-		vertices.push_back({ +1, -1, +1,  0, +1,  0,  0,  0, +1, 1, 0 });
-		vertices.push_back({ -1, -1, -1,  0, +1,  0,  0,  0, +1, 0, 1 });
-		vertices.push_back({ +1, -1, -1,  0, +1,  0,  0,  0, +1, 1, 1 });
+		vertices.push_back({ -1, -1, +1,  0, +1,  0,  0,  0,  0, 0, 0 });
+		vertices.push_back({ +1, -1, +1,  0, +1,  0,  0,  0,  0, 1, 0 });
+		vertices.push_back({ -1, -1, -1,  0, +1,  0,  0,  0,  0, 0, 1 });
+		vertices.push_back({ +1, -1, -1,  0, +1,  0,  0,  0,  0, 1, 1 });
 		for (auto& v : vertices) { v.position[0] *= 3; v.position[1] *= 3; v.position[2] *= 3; }
 		indices.push_back({ 0, 1, 2, 2, 1, 3 });
 
@@ -1412,7 +1380,7 @@ float4 main() : SV_Target {
 		} cbufLight;
 		cbufLight.CameraPosition = mCameraPos;
 		cbufLight.SunLightIntensity = DirectX::XMVectorSet(3.0f, 3.0f, 3.0f, 1.0f);
-		cbufLight.SunLightDirection = DirectX::XMVector3Normalize(DirectX::XMVectorSet(-0.1f, 0.1f, -1.0f, 1.0f));
+		cbufLight.SunLightDirection = DirectX::XMVector3Normalize(DirectX::XMVectorSet(1.0f, 0.2f, -0.0f, 1.0f));
 
 		auto* pUB = (uint8_t*)mDevice->mapMemory(*mUniformMemory, mUniformMemoryOffsets[mFrameCount % 2], UniformBufferSize);
 		memcpy(pUB, &cbufBuf, sizeof cbufBuf);
