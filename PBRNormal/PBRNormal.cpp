@@ -1025,10 +1025,10 @@ float4 main() : SV_Target {
 		// Generate a plane
 		vertices.clear();
 		indices.clear();
-		vertices.push_back({ -1, -1, +1,  0, +1,  0,  0,  0,  0, 0, 0 });
-		vertices.push_back({ +1, -1, +1,  0, +1,  0,  0,  0,  0, 1, 0 });
-		vertices.push_back({ -1, -1, -1,  0, +1,  0,  0,  0,  0, 0, 1 });
-		vertices.push_back({ +1, -1, -1,  0, +1,  0,  0,  0,  0, 1, 1 });
+		vertices.push_back({ -1, -1, +1,  0, +1,  0, +1,  0,  0, 0, 0 });
+		vertices.push_back({ +1, -1, +1,  0, +1,  0, +1,  0,  0, 1, 0 });
+		vertices.push_back({ -1, -1, -1,  0, +1,  0, +1,  0,  0, 0, 1 });
+		vertices.push_back({ +1, -1, -1,  0, +1,  0, +1,  0,  0, 1, 1 });
 		for (auto& v : vertices) { v.position[0] *= 3; v.position[1] *= 3; v.position[2] *= 3; }
 		indices.push_back({ 0, 1, 2, 2, 1, 3 });
 
@@ -1380,7 +1380,7 @@ float4 main() : SV_Target {
 		} cbufLight;
 		cbufLight.CameraPosition = mCameraPos;
 		cbufLight.SunLightIntensity = DirectX::XMVectorSet(3.0f, 3.0f, 3.0f, 1.0f);
-		cbufLight.SunLightDirection = DirectX::XMVector3Normalize(DirectX::XMVectorSet(1.0f, 0.2f, -0.0f, 1.0f));
+		cbufLight.SunLightDirection = DirectX::XMVector3Normalize(DirectX::XMVectorSet(1.0f, 0.5f, 0.0f, 1.0f));
 
 		auto* pUB = (uint8_t*)mDevice->mapMemory(*mUniformMemory, mUniformMemoryOffsets[mFrameCount % 2], UniformBufferSize);
 		memcpy(pUB, &cbufBuf, sizeof cbufBuf);
