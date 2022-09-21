@@ -999,7 +999,7 @@ void main(uint3 dtid : SV_DispatchThreadID) {
 )#";
 
 		static const char shaderCodeProjSHCS[] = R"#(
-// https://github.com/microsoft/DirectXMath/blob/main/SHMath/DirectXSHD3D12.cpp (MIT License)
+// https://andrew-pham.blog/2019/08/26/spherical-harmonics/
 // https://www.ppsloan.org/publications/StupidSH36.pdf
 // https://www.ppsloan.org/publications/SHJCGT.pdf
 #define PI (3.14159265f)
@@ -1059,28 +1059,26 @@ void writeSH(int r[9], int idx) {
 		InterlockedAdd(Output[9 * idx + i], r[i]);
 	}
 }
-void processProjectSH(float3 dir, float3 color, float fSize, uint2 idx) {
-	float fB = -1 + 1 / fSize;
-	float fS = 2 * (1 - 1 / fSize) / (fSize - 1);
-	float v = (float)idx.y * fS + fB;
-	float u = (float)idx.x * fS + fB;
-	float fTmp = 1 + u * u + v * v;
-	float fWt = 4 / (sqrt(fTmp) * fTmp);
+void processProjectSH(float3 dir, float3 color, float2 uv) {
+	float u = uv.x * 2 - 1;
+	float v = uv.y * 2 - 1;
+	float temp = 1.0 + u * u + v * v;
+	float weight = 4 / (sqrt(temp) * temp);
 	float basis[9];
 	SHNewEval3(-dir.x, -dir.y, -dir.z, basis);
 	float tempR[9], tempG[9], tempB[9];
-	SHScale(basis, color.r * fWt, tempR);
-	SHScale(basis, color.g * fWt, tempG);
-	SHScale(basis, color.b * fWt, tempB);
+	SHScale(basis, color.r * weight, tempR);
+	SHScale(basis, color.g * weight, tempG);
+	SHScale(basis, color.b * weight, tempB);
 	int iTempR[9], iTempG[9], iTempB[9];
 	toFixedPoint(tempR, iTempR);
 	toFixedPoint(tempG, iTempG);
 	toFixedPoint(tempB, iTempB);
-	int iWt = toFixedPointWt(fWt);
+	int iWeight = toFixedPointWt(weight);
 	writeSH(iTempR, 0);
 	writeSH(iTempG, 1);
 	writeSH(iTempB, 2);
-	InterlockedAdd(Output[27], iWt);
+	InterlockedAdd(Output[27], iWeight);
 }
 [numthreads(8, 8, 1)]
 void main(uint3 dtid : SV_DispatchThreadID) {
@@ -1089,7 +1087,7 @@ void main(uint3 dtid : SV_DispatchThreadID) {
 	float2 uv = ((float2)dtid.xy + 0.5) / float2(width, height);
 	float3 dir = directionFrom3D(uv.x * 2 - 1, uv.y * 2 - 1, dtid.z);
 	float3 color = Input.Load(int4(dtid, 0));
-	processProjectSH(normalize(dir), color, width, dtid.xy);
+	processProjectSH(normalize(dir), color, uv);
 }
 )#";
 
