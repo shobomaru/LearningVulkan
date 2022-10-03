@@ -37,6 +37,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "PBRNormal", "PBRNormal\PBRN
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Vulkan12BufferDeviceAddress", "Vulkan12BufferDeviceAddress\Vulkan12BufferDeviceAddress.vcxproj", "{548C34FF-6C1B-4B11-8452-5D417C44248D}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Shadow", "Shadow\Shadow.vcxproj", "{79547E6F-3439-40E7-9C16-903E7C9AADED}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -149,6 +151,12 @@ Global
 		{548C34FF-6C1B-4B11-8452-5D417C44248D}.Release|x64.ActiveCfg = Release|x64
 		{548C34FF-6C1B-4B11-8452-5D417C44248D}.Release|x64.Build.0 = Release|x64
 		{548C34FF-6C1B-4B11-8452-5D417C44248D}.Release|x86.ActiveCfg = Release|x64
+		{79547E6F-3439-40E7-9C16-903E7C9AADED}.Debug|x64.ActiveCfg = Debug|x64
+		{79547E6F-3439-40E7-9C16-903E7C9AADED}.Debug|x64.Build.0 = Debug|x64
+		{79547E6F-3439-40E7-9C16-903E7C9AADED}.Debug|x86.ActiveCfg = Debug|x64
+		{79547E6F-3439-40E7-9C16-903E7C9AADED}.Release|x64.ActiveCfg = Release|x64
+		{79547E6F-3439-40E7-9C16-903E7C9AADED}.Release|x64.Build.0 = Release|x64
+		{79547E6F-3439-40E7-9C16-903E7C9AADED}.Release|x86.ActiveCfg = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
