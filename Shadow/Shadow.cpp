@@ -108,7 +108,7 @@ class VLK
 	vk::UniqueFramebuffer mSceneFramebuffer;
 
 	vk::Extent2D mShadowExtent;
-	vk::UniqueImage mShadowepth;
+	vk::UniqueImage mShadowDepth;
 	vk::UniqueDeviceMemory mShadowDepthMemory;
 	vk::UniqueImageView mShadowDepthView;
 	vk::UniqueFramebuffer mShadowFramebuffer;
@@ -133,8 +133,8 @@ class VLK
 	vk::UniqueDeviceMemory mUniformMemory;
 	vk::DeviceSize mUniformMemoryOffsets[2];
 
-	vk::DescriptorSet mSphereDescSet[2];
-	vk::DescriptorSet mPlaneDescSet[2];
+	vk::DescriptorSet mSphereDescSet[2][Subpass::Max];
+	vk::DescriptorSet mPlaneDescSet[2][Subpass::Max];
 
 public:
 	~VLK()
@@ -187,8 +187,8 @@ public:
 			for (auto& layer : layers)
 			{
 				ASSERT(find_if(begin(supportedLayers), end(supportedLayers),
-						[&](const vk::LayerProperties& s) { return string_view(s.layerName) == layer; }
-					) != end(supportedLayers), "Layer not available");
+					[&](const vk::LayerProperties& s) { return string_view(s.layerName) == layer; }
+				) != end(supportedLayers), "Layer not available");
 			}
 		}
 #endif
@@ -196,8 +196,8 @@ public:
 		{
 			const auto supportedExts = vk::enumerateInstanceExtensionProperties();
 			ASSERT(find_if(begin(supportedExts), end(supportedExts),
-					[&](const vk::ExtensionProperties& s) { return string_view(s.extensionName) == ext; }
-				) != end(supportedExts), "Extension not available");
+				[&](const vk::ExtensionProperties& s) { return string_view(s.extensionName) == ext; }
+			) != end(supportedExts), "Extension not available");
 		}
 
 		// Set debug util
@@ -253,8 +253,8 @@ public:
 		{
 			const auto supportedExts = physDevice.enumerateDeviceExtensionProperties();
 			ASSERT(find_if(begin(supportedExts), end(supportedExts),
-					[&](const vk::ExtensionProperties& s) { return string_view(s.extensionName) == ext; }
-				) != end(supportedExts), "Extension not available");
+				[&](const vk::ExtensionProperties& s) { return string_view(s.extensionName) == ext; }
+			) != end(supportedExts), "Extension not available");
 		}
 
 		// Create a device
@@ -277,11 +277,11 @@ public:
 		const auto surfaceColorSpace = vk::ColorSpaceKHR::eSrgbNonlinear;
 		const auto supportedSurfaceFormats = physDevice.getSurfaceFormatsKHR(*mSurface);
 		ASSERT(find_if(supportedSurfaceFormats.begin(),
-				supportedSurfaceFormats.end(),
-				[&](vk::SurfaceFormatKHR s) {
-					return s.format == surfaceFormat && s.colorSpace == surfaceColorSpace;
-				}
-			) != supportedSurfaceFormats.end() , "Surface format mismatch");
+			supportedSurfaceFormats.end(),
+			[&](vk::SurfaceFormatKHR s) {
+				return s.format == surfaceFormat && s.colorSpace == surfaceColorSpace;
+			}
+		) != supportedSurfaceFormats.end(), "Surface format mismatch");
 
 		// Create a swapchain
 		const auto surfaceCaps = physDevice.getSurfaceCapabilitiesKHR(*mSurface);
@@ -290,7 +290,7 @@ public:
 		const auto presentMode = vk::PresentModeKHR::eFifo;
 		const auto surfacePresentModes = physDevice.getSurfacePresentModesKHR(*mSurface);
 		ASSERT(find(surfacePresentModes.begin(), surfacePresentModes.end(), presentMode)
-				!= surfacePresentModes.end(), "Unsupported presentation mode");
+			!= surfacePresentModes.end(), "Unsupported presentation mode");
 		const auto swapChainCreateInfo = vk::SwapchainCreateInfoKHR(
 			{}, *mSurface, BUFFER_COUNT, surfaceFormat, surfaceColorSpace,
 			vk::Extent2D(width, height), 1,
@@ -335,6 +335,12 @@ public:
 		}
 
 		// Create a render pass
+		const auto shadowAttachmentDesc = vk::AttachmentDescription(
+			{}, vk::Format::eD32Sfloat, vk::SampleCountFlagBits::e1,
+			vk::AttachmentLoadOp::eClear, vk::AttachmentStoreOp::eDontCare,
+			vk::AttachmentLoadOp::eDontCare, vk::AttachmentStoreOp::eDontCare,
+			vk::ImageLayout::eUndefined, vk::ImageLayout::eShaderReadOnlyOptimal
+		);
 		const auto colorAttachmentDesc = vk::AttachmentDescription(
 			{}, surfaceFormat, vk::SampleCountFlagBits::e1,
 			vk::AttachmentLoadOp::eClear, vk::AttachmentStoreOp::eStore,
@@ -347,32 +353,65 @@ public:
 			vk::AttachmentLoadOp::eDontCare, vk::AttachmentStoreOp::eDontCare,
 			vk::ImageLayout::eUndefined, vk::ImageLayout::eDepthStencilAttachmentOptimal
 		);
-		const auto attachmentsDesc = { colorAttachmentDesc , depthAttachmentDesc };
+		const auto attachmentsDesc = { shadowAttachmentDesc, colorAttachmentDesc , depthAttachmentDesc };
+		const auto shadowAttachmentRef = vk::AttachmentReference(
+			0, vk::ImageLayout::eDepthStencilAttachmentOptimal
+		);
 		const auto colorAttachmentRef = vk::AttachmentReference(
-			0, vk::ImageLayout::eColorAttachmentOptimal
+			1, vk::ImageLayout::eColorAttachmentOptimal
 		);
 		const auto depthAttachmentRef = vk::AttachmentReference(
-			1, vk::ImageLayout::eDepthStencilAttachmentOptimal
+			2, vk::ImageLayout::eDepthStencilAttachmentOptimal
 		);
-		const auto subpassDesc = vk::SubpassDescription(
-			{}, vk::PipelineBindPoint::eGraphics, {}, colorAttachmentRef, {}, &depthAttachmentRef
-		);
+		const auto subpassDescs = {
+			vk::SubpassDescription(
+				{}, vk::PipelineBindPoint::eGraphics, {}, {}, {}, &shadowAttachmentRef
+			),
+			vk::SubpassDescription(
+				{}, vk::PipelineBindPoint::eGraphics, {}, colorAttachmentRef, {}, &depthAttachmentRef
+			)
+		};
 		mRenderPass = mDevice->createRenderPassUnique(
-			vk::RenderPassCreateInfo({}, attachmentsDesc, subpassDesc)
+			vk::RenderPassCreateInfo({}, attachmentsDesc, subpassDescs)
 		);
 
 		// Create a descriptor set
-		const auto descriptorBinding = vk::DescriptorSetLayoutBinding(
-			0, vk::DescriptorType::eUniformBuffer, 1, vk::ShaderStageFlagBits::eVertex
-		);
-		const auto descriptorSetLayoutInfo = vk::DescriptorSetLayoutCreateInfo(
-			{}, descriptorBinding
-		);
-		mDescriptorSetLayout = mDevice->createDescriptorSetLayoutUnique(descriptorSetLayoutInfo);
+		{
+			const auto descriptorBindings = {
+				vk::DescriptorSetLayoutBinding(
+					0, vk::DescriptorType::eUniformBuffer, 1, vk::ShaderStageFlagBits::eVertex
+				),
+				vk::DescriptorSetLayoutBinding(
+					1, vk::DescriptorType::eUniformBuffer, 1, vk::ShaderStageFlagBits::eFragment
+				),
+				vk::DescriptorSetLayoutBinding(
+					2, vk::DescriptorType::eSampledImage, 1, vk::ShaderStageFlagBits::eFragment
+				),
+				vk::DescriptorSetLayoutBinding(
+					3, vk::DescriptorType::eSampler, 1, vk::ShaderStageFlagBits::eFragment
+				)
+			};
+			const auto descriptorSetLayoutInfo = vk::DescriptorSetLayoutCreateInfo(
+				{}, descriptorBindings
+			);
+			mDescriptorSetLayout = mDevice->createDescriptorSetLayoutUnique(descriptorSetLayoutInfo);
+		}
+		{
+			const auto descriptorBinding = vk::DescriptorSetLayoutBinding(
+				0, vk::DescriptorType::eUniformBuffer, 1, vk::ShaderStageFlagBits::eVertex
+			);
+			const auto descriptorSetLayoutInfo = vk::DescriptorSetLayoutCreateInfo(
+				{}, descriptorBinding
+			);
+			mDescriptorSetLayoutShadow = mDevice->createDescriptorSetLayoutUnique(descriptorSetLayoutInfo);
+		}
 
 		// Create a pipeline layout
 		mPipelineLayout = mDevice->createPipelineLayoutUnique(
 			vk::PipelineLayoutCreateInfo({}, *mDescriptorSetLayout)
+		);
+		mPipelineLayoutShadow = mDevice->createPipelineLayoutUnique(
+			vk::PipelineLayoutCreateInfo({}, *mDescriptorSetLayoutShadow)
 		);
 
 		// Create modules
@@ -395,6 +434,11 @@ Output main(float3 position : Position, float3 normal : Normal) {
 )#";
 
 		static const char shaderCodeScenePS[] = R"#(
+Texture2D<float> ShadowMap;
+SamplerState SS;
+cbuffer CLight {
+	float4x4 ShadowViewProj;
+}
 struct Input {
 	float4 position : SV_Position;
 	float3 world : WorldPosition;
@@ -402,6 +446,12 @@ struct Input {
 };
 float4 main(Input input) : SV_Target {
 	float4 color = float4(input.normal.xyz * 0.5 + 0.5, 1.0);
+	float4 wpos = mul(float4(input.world, 1), ShadowViewProj);
+	wpos.xyz /= wpos.w;
+	if (all(wpos.xy >= -1 && wpos.xy <= 1)) {
+		float s = ShadowMap.SampleCmpLevelZero(SS, wpos.xy * 0.5 + 0.5);
+		color.xyz *= s;
+	}
 	return color;
 }
 )#";
@@ -496,6 +546,18 @@ float4 main(Input input) : SV_Target {
 		CHK(vkres.result);
 		mPSO = std::move(vkres.value);
 
+		const auto pipelineShadersInfoShadow = {
+			vk::PipelineShaderStageCreateInfo({}, vk::ShaderStageFlagBits::eVertex, *vsModule, "main"),
+		};
+		const auto pipelineInfoShadow = vk::GraphicsPipelineCreateInfo(
+			{}, pipelineShadersInfoShadow, &pipelineVertexInputsInfo, &pipelineInputAssemblyStateInfo,
+			nullptr, &viewportStateInfo, &pipelineRSInfo, &pipelineMSAAInfo, &pipelineDSSInfo,
+			&pipelineBSInfo, &pipelineDynamicStatesInfo, *mPipelineLayout, *mRenderPass
+		);
+		auto vkres = mDevice->createGraphicsPipelineUnique(nullptr, pipelineInfoShadow);
+		CHK(vkres.result);
+		mPSOShadow = std::move(vkres.value);
+
 		// Get memory props
 		const auto memoryProps = physDevice.getMemoryProperties();
 		auto GetMemTypeIndex = [&](const vk::MemoryRequirements& memReq, bool hostVisible) {
@@ -551,6 +613,24 @@ float4 main(Input input) : SV_Target {
 			{}, *mSceneDepth, vk::ImageViewType::e2D, vk::Format::eD32Sfloat, {},
 			vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eDepth, 0, 1, 0, 1)
 		));
+
+		// Create a shadow depth buffer
+		mShadowDepth = mDevice->createImageUnique(vk::ImageCreateInfo(
+			{}, vk::ImageType::e2D, vk::Format::eD32Sfloat, vk::Extent3D(512, 512, 1),
+			1, 1, vk::SampleCountFlagBits::e1, vk::ImageTiling::eOptimal,
+			vk::ImageUsageFlagBits::eDepthStencilAttachment | vk::ImageUsageFlagBits::eSampled
+		).setInitialLayout(vk::ImageLayout::eUndefined)
+		);
+		const auto shadowMemReq = mDevice->getImageMemoryRequirements(*mShadowDepth);
+		mShadowDepthMemory = mDevice->allocateMemoryUnique(vk::MemoryAllocateInfo(
+			shadowMemReq.size, GetMemTypeIndex(shadowMemReq, false)
+		));
+		mDevice->bindImageMemory(*mShadowDepth, *mShadowDepthMemory, 0);
+		mShadowDepthView = mDevice->createImageViewUnique(vk::ImageViewCreateInfo(
+			{}, *mShadowDepth, vk::ImageViewType::e2D, vk::Format::eD32Sfloat, {},
+			vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eDepth, 0, 1, 0, 1)
+		));
+		mShadowExtent = vk::Extent2D(512, 512);
 
 		// Create a frame buffer
 		const auto framebufferAttachments = { *mSceneColorView, *mSceneDepthView };
