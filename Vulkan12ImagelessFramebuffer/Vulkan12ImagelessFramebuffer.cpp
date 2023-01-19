@@ -553,7 +553,7 @@ float4 main(Input input) : SV_Target {
 			framebufferAttachmentImages
 		);
 		mSceneFramebuffer = mDevice->createFramebufferUnique(vk::FramebufferCreateInfo(
-			vk::FramebufferCreateFlagBits::eImageless, *mRenderPass, framebufferAttachmentImages.size(), nullptr,
+			vk::FramebufferCreateFlagBits::eImageless, *mRenderPass, (uint32_t)framebufferAttachmentImages.size(), nullptr,
 			width, height, 1
 		).setPNext(&framebufferAttachmentInfo));
 		mSceneExtent = vk::Extent2D(width, height);
