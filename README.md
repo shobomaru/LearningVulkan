@@ -5,10 +5,10 @@ Just my training
 
 ## Requirements
 
-Windows 10+ (64bit)  
+Windows 10 or 11 (64bit only)  
 Latest graphics driver  
-VisualStudio 2019  
-Vulkan SDK 1.2+  
+VisualStudio 2019 or 2022  
+Vulkan SDK 1.2+ (prefer 1.3)  
 
 ## License
 
