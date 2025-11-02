@@ -209,6 +209,7 @@ public:
 			VK_KHR_SWAPCHAIN_EXTENSION_NAME,
 			VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME,
 			VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME,
+			VK_KHR_FORMAT_FEATURE_FLAGS_2_EXTENSION_NAME, // UAV image
 		};
 
 		// Create a Vulkan instance
@@ -616,8 +617,10 @@ struct Output {
 	float roughness : Roughness;
 	float2 clearCoat : ClearCoat;
 };
-Output main(uint instanceID : SV_InstanceID, [[vk::builtin("BaseInstance")]] uint baseInstanceID : BaseInstanceID,
+Output main(uint instanceID : SV_InstanceID, //[[vk::builtin("BaseInstance")]] uint baseInstanceID : BaseInstanceID,
 			 float3 position : Position, float3 normal : Normal, float2 texcoord : Texcoord) {
+	// Workaround: -fvk-support-nonzero-base-instance is disabled because of dxc internal bug
+	const uint baseInstanceID = 0;
 	float4 wpos = mul(float4(position, 1), Model[instanceID + baseInstanceID]);
 	Output output;
 	output.position = mul(wpos, ViewProj);
@@ -793,7 +796,7 @@ float3 linearToSrgb(float3 lin) {
 	lin = saturate(lin);
 	float3 s1 = 1.055 * pow(lin, 1 / 2.4) - 0.055;
 	float3 s2 = lin * 12.92;
-	return step(lin, 0.0031308) * s2 + (step(lin, 0.0031308) ? 0 : 1) * s1;
+	return step(lin, 0.0031308) * s2 + select(step(lin, 0.0031308), 0, 1) * s1;
 }
 float4 main() : SV_Target {
 	float3 color = Input.SubpassLoad().rgb;
@@ -908,7 +911,7 @@ float3 directionFrom3D(float x, float y, uint z) {
 	return (float3)0;
 }
 [[vk::binding(0, 0)]] TextureCube<float3> Input;
-[[vk::binding(1, 0)]] RWTexture2DArray<float3> Output;
+[[vk::binding(1, 0)]] RWTexture2DArray<float4> Output; // float3 cannot accept for RGBA16 imageView in vk1.0-1.2
 [[vk::binding(2, 0)]] SamplerState SS;
 float3 PrefilterEnvMap(float Roughness, float3 R) {
 	float3 N = R;
@@ -934,7 +937,7 @@ void main(uint3 dtid : SV_DispatchThreadID) {
 	float roughness = 1.0 - ((float)firstbitlow(width) / firstbitlow(128));
 	float2 uv = ((float2)dtid.xy + 0.5) / float2(width, height);
 	float3 dir = directionFrom3D(uv.x * 2 - 1, uv.y * 2 - 1, dtid.z);
-	Output[dtid] = PrefilterEnvMap(roughness, normalize(dir));
+	Output[dtid] = float4(PrefilterEnvMap(roughness, normalize(dir)), 1);
 }
 )#";
 
@@ -973,7 +976,7 @@ float3 directionFrom3D(float x, float y, uint z) {
 	return (float3)0;
 }
 [[vk::binding(0, 0)]] TextureCube<float3> Input;
-[[vk::binding(1, 0)]] RWTexture2DArray<float3> Output;
+[[vk::binding(1, 0)]] RWTexture2DArray<float4> Output; // float3 cannot accept for RGBA16 imageView in vk1.0-1.2
 [[vk::binding(2, 0)]] SamplerState SS;
 float3 integrateDiffuseCube(float3 N) {
 	float3 accBrdf = 0;
@@ -994,7 +997,7 @@ void main(uint3 dtid : SV_DispatchThreadID) {
 	Output.GetDimensions(width, height, arrayLayer);
 	float2 uv = ((float2)dtid.xy + 0.5) / float2(width, height);
 	float3 dir = directionFrom3D(uv.x * 2 - 1, uv.y * 2 - 1, dtid.z);
-	Output[dtid] = integrateDiffuseCube(normalize(dir));
+	Output[dtid] = float4(integrateDiffuseCube(normalize(dir)), 1);
 }
 )#";
 
@@ -1142,7 +1145,7 @@ void main(uint dtid : SV_DispatchThreadID) {
 		ComPtr<IDxcBlobEncoding> dxcError;
 		ComPtr<IDxcOperationResult> dxcRes;
 		const wchar_t* shaderArgsVS[] = {
-			L"-Zi", L"-all_resources_bound", L"-Qembed_debug", L"-spirv", L"-fvk-invert-y", L"-fvk-support-nonzero-base-instance",
+			L"-Zi", L"-all_resources_bound", L"-Qembed_debug", L"-spirv", L"-fvk-invert-y",// L"-fvk-support-nonzero-base-instance",
 		};
 		const wchar_t* shaderArgsPS[] = {
 			L"-Zi", L"-all_resources_bound", L"-Qembed_debug", L"-spirv", L"-fvk-use-dx-position-w"
