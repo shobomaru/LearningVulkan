@@ -76,8 +76,9 @@ class VLK
 	vk::UniqueSwapchainKHR mSwapchain;
 	std::vector<vk::Image> mBackBuffers;
 	std::vector<vk::UniqueImageView> mBackBuffersView;
-	vk::UniqueSemaphore mSwapchainSema;
-	vk::UniqueSemaphore mDrawingSema;
+
+	vk::UniqueSemaphore mSwapchainSema[BUFFER_COUNT];
+	vk::UniqueSemaphore mDrawingSema[BUFFER_COUNT];
 
 	uint32_t mBackBufferIdx = 0;
 	uint64_t mFrameCount = 0;
@@ -353,10 +354,9 @@ public:
 				.setSubresourceRange(
 					vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1));
 			mBackBuffersView.push_back(mDevice->createImageViewUnique(viewInfo));
+			mSwapchainSema[i] = mDevice->createSemaphoreUnique({});
+			mDrawingSema[i] = mDevice->createSemaphoreUnique({});
 		}
-
-		mSwapchainSema = mDevice->createSemaphoreUnique({});
-		mDrawingSema = mDevice->createSemaphoreUnique({});
 
 		// Create commands
 		mCmdPool = mDevice->createCommandPoolUnique(
@@ -365,7 +365,7 @@ public:
 				queueGfxIdx));
 		mCmdBuf = mDevice->allocateCommandBuffersUnique(
 			vk::CommandBufferAllocateInfo(*mCmdPool, vk::CommandBufferLevel::ePrimary, 2));
-		for (int i = 0; i < _countof(mCmdFence); ++i)
+		for (int i = 0; i < 2; ++i)
 		{
 			mCmdFence[i] = mDevice->createFenceUnique(vk::FenceCreateInfo(vk::FenceCreateFlagBits::eSignaled));
 		}
@@ -929,16 +929,18 @@ float4 main(Input input) : SV_Target {
 
 	void Draw()
 	{
-		const auto backBufferIdx = mDevice->acquireNextImageKHR(*mSwapchain, 100000000000, *mSwapchainSema);
-		CHK(backBufferIdx.result);
-		mBackBufferIdx = backBufferIdx.value;
+		mFrameCount++;
 
 		const auto fence = *mCmdFence[mFrameCount % 2];
 		auto r = mDevice->waitForFences(fence, VK_TRUE, 100000000000);
 		CHK(r);
 		mDevice->resetFences(fence);
 
-		mFrameCount++;
+		auto& drawingSema = mDrawingSema[mFrameCount % BUFFER_COUNT];
+		const auto backBufferIdx = mDevice->acquireNextImageKHR(*mSwapchain, 100000000000, *drawingSema);
+		CHK(backBufferIdx.result);
+		mBackBufferIdx = backBufferIdx.value;
+		auto& swapchainSema = mSwapchainSema[mBackBufferIdx];
 		
 		// Make uniform buffer
 
@@ -1101,14 +1103,15 @@ float4 main(Input input) : SV_Target {
 		// Execute a command
 
 		const vk::PipelineStageFlags submitPipelineStage = vk::PipelineStageFlagBits::eBottomOfPipe;
-		const auto submitInfo = vk::SubmitInfo(*mSwapchainSema, submitPipelineStage, cmdBuf, *mDrawingSema);
+		const auto submitInfo = vk::SubmitInfo(*drawingSema, submitPipelineStage, cmdBuf, *swapchainSema);
 		mQueue.submit(submitInfo, fence);
 	}
 
 	void Present()
 	{
-		const auto presentInfo = vk::PresentInfoKHR(*mDrawingSema, *mSwapchain, mBackBufferIdx);
+		const auto presentInfo = vk::PresentInfoKHR(*mSwapchainSema[mBackBufferIdx], *mSwapchain, mBackBufferIdx);
 		const auto r = mQueuePresent.presentKHR(presentInfo);
+		ASSERT(r == vk::Result::eSuccess || r == vk::Result::eSuboptimalKHR, "Presentation failed");
 	}
 
 	void MoveUp()
